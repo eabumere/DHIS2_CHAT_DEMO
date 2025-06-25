@@ -6,6 +6,8 @@ import requests
 import json
 import re
 from typing import Optional, Dict, List
+import time
+
 
 # Load .env credentials
 load_dotenv()
@@ -48,14 +50,13 @@ def create_metadata(input_str: str) -> str:
     """
     return dhis2_tool_metadata_wrapper(input_str)
 
-def dhis2_tool_metadata_wrapper(input_str: str) -> str:
+def dhis2_tool_metadata_wrapper(input_str: str) -> dict:
     try:
         data = json.loads(input_str)
         endpoint = data["endpoint"]
         payload = data["payload"]
         schema_name = endpoint.rstrip("s")
 
-        # Normalize to list
         if not isinstance(payload, list):
             payload = [payload]
 
@@ -71,29 +72,31 @@ def dhis2_tool_metadata_wrapper(input_str: str) -> str:
             if missing_fields:
                 fields_list = ", ".join(missing_fields)
                 schema_url = f"/api/schemas/{schema_name}.json"
-                return (
-                    f"ℹ️ To create a new `{schema_name}`, please provide the following required field(s): {fields_list}.\n"
-                    f"Refer to the full schema here: `{schema_url}`"
-                )
+                return {
+                    "status": "error",
+                    "reason": f"Missing required fields: {fields_list}",
+                    "missingFields": missing_fields,
+                    "schema": schema_url
+                }
 
-        # All valid → submit once
         wrapped_payload = {endpoint: payload}
         response_json = post_dhis2_api(endpoint, wrapped_payload)
 
-        # Interpret response for duplicates or success
         message = interpret_post_response(response_json)
-
-        # Optionally, include names of created/updated items
         created_names = [item.get("name") or item.get("shortName") or "Unnamed item" for item in payload]
-        plural_name = schema_name + ("s" if len(created_names) > 1 else "")
-        names_str = ", ".join(f'"{name}"' for name in created_names)
 
-        return f"{message}\nItems: {names_str}"
+        return {
+            "status": "success",
+            "endpoint": endpoint,
+            "payload": payload,
+            "createdItems": created_names,
+            "message": message
+        }
 
     except RuntimeError as e:
-        return f"❌ {str(e)}"
+        return {"status": "error", "reason": str(e)}
     except Exception as e:
-        return f"❌ Invalid input or schema validation failed: {str(e)}"
+        return {"status": "error", "reason": f"Invalid input or schema validation failed: {str(e)}"}
 
 def validate_and_post_dhis2_item(endpoint: str, schema_name: str, payload: dict) -> str:
     try:
@@ -119,14 +122,42 @@ def validate_and_post_dhis2_item(endpoint: str, schema_name: str, payload: dict)
 
 def get_required_fields_for_schema(schema_name: str) -> list:
     try:
-        url = f"{base_url}/api/schemas/{schema_name}.json"
-        print(f"🔍 Fetching schema: {url}")
-        response = requests.get(url, auth=(username, password))
-        response.raise_for_status()
-        schema = response.json()
+        schema = get_schema_with_retry(schema_name)
         return [prop["name"] for prop in schema.get("properties", []) if prop.get("required")]
     except Exception as e:
-        raise RuntimeError(f"Failed to fetch schema for `{schema_name}`: {str(e)}")
+        raise RuntimeError(f"❌ Failed to get required fields for `{schema_name}`: {str(e)}")
+
+
+def get_schema_with_retry(schema_name: str, max_retries: int = 3, backoff_factor: float = 1.5) -> dict:
+    """
+    Fetch a DHIS2 schema with retry logic.
+
+    Args:
+        schema_name (str): The name of the schema (e.g., 'dataElement').
+        max_retries (int): Maximum number of retry attempts.
+        backoff_factor (float): Multiplier for wait time between retries.
+
+    Returns:
+        dict: Parsed schema JSON.
+
+    Raises:
+        RuntimeError: If the schema cannot be retrieved after retries.
+    """
+    url = f"{base_url}/api/schemas/{schema_name}.json"
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(url, auth=(username, password))
+            response.raise_for_status()
+            data = response.json()
+            if "name" in data:
+                return data
+            raise ValueError("Schema structure invalid.")
+        except Exception as e:
+            if attempt == max_retries:
+                raise RuntimeError(f"Failed to fetch schema `{schema_name}` after {max_retries} attempts: {str(e)}")
+            sleep_time = backoff_factor ** attempt
+            time.sleep(sleep_time)
 
 
 @tool
@@ -280,22 +311,34 @@ def post_dhis2_api(endpoint: str, payload: dict, params: dict = None) -> dict:
         raise RuntimeError(f"POST failed for endpoint `{endpoint}`: {str(e)}")
 
 def interpret_post_response(response_json: dict) -> str:
-    # Try to find importSummaries or fallback to root
-    summaries = response_json.get("importSummaries") or [response_json]
+    status = response_json.get("status")
+    response_type = response_json.get("responseType")
+    conflicts = response_json.get("conflicts", [])
+    import_count = response_json.get("importCount", {})
+    created = import_count.get("imported", 0)
+    updated = import_count.get("updated", 0)
+    ignored = import_count.get("ignored", 0)
 
-    for summary in summaries:
-        conflicts = summary.get("conflicts", [])
+    if status != "OK" or response_type == "ERROR":
         if conflicts:
-            duplicate_conflicts = [
-                c for c in conflicts
-                if "already exists" in c.get("value", "").lower() or "duplicate" in c.get("value", "").lower()
-            ]
-            if duplicate_conflicts:
-                conflict_msgs = "; ".join(c.get("value", "") for c in duplicate_conflicts)
-                return f"⚠️ Some items already exist or are duplicates: {conflict_msgs}"
+            conflict_details = []
+            for conflict in conflicts:
+                obj = conflict.get("object", "Unknown object")
+                msg = conflict.get("value", "No details")
+                conflict_details.append(f"❌ {obj}: {msg}")
+            return "⚠️ Conflict(s) occurred:\n" + "\n".join(conflict_details)
+        return "❌ Operation failed without detailed conflict info."
 
-    # No conflicts detected, assume success
-    return "✅ Metadata posted successfully."
+    summary = []
+    if created:
+        summary.append(f"✅ {created} item(s) created")
+    if updated:
+        summary.append(f"🔄 {updated} item(s) updated")
+    if ignored:
+        summary.append(f"⚠️ {ignored} item(s) ignored")
+
+    return "\n".join(summary) if summary else "✅ Operation completed, but no changes reported."
+
 
 
 

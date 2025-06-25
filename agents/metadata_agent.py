@@ -1,13 +1,12 @@
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import ToolMessage, BaseMessage, AIMessage
+from langchain_core.messages import BaseMessage, AIMessage
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from tools import create_metadata, get_dhis2_metadata, delete_metadata, update_metadata
+from .tools.metadata_tools import create_metadata, get_dhis2_metadata, delete_metadata, update_metadata
 from dotenv import load_dotenv
 from typing import List, TypedDict
 import os
-import json
 
 # Load environment variables from .env
 load_dotenv()
@@ -49,10 +48,19 @@ Use the appropriate tool for the user’s intent. When creating or posting data,
 
 If filters or parameters are mentioned (e.g., "page 2 of org units in level 2 under Rwanda"), convert them into query parameters and pass them to the metadata tool.
 
+When asked to find the most recent or "last created" or "last updated" metadata item, use query parameters like:
+- `order=created:desc` for the most recently created item
+- `order=lastUpdated:desc` for the most recently updated item
+- `pageSize=1` to limit to just the latest
+- `fields=id,name,created,lastUpdated` to simplify the result
+
+Infer whether to sort by `created` or `lastUpdated` based on the user's phrasing.
+
 Only use tools provided: `get_dhis2_metadata`, `create_metadata`, `update_metadata`{', `delete_metadata`' if enable_delete else ''}. If a request goes beyond these, inform the user.
 
 Be concise, helpful, and accurate.
 """
+
 
 
 # --- Prompt Template ---
