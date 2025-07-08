@@ -1,0 +1,27 @@
+{
+  "id": "",
+  "name": "",
+  "shortName": "",
+  "periodType": "",
+  "categoryCombo": {
+    "id": ""
+  },
+  "dataSetElements": [
+    {
+      "dataSet": {
+          "id": ""
+        },
+          "dataElement": {
+              "id": ""
+        }
+    },
+    {
+      "dataSet": {
+          "id": ""
+      },
+          "dataElement": {
+              "id": ""
+      }
+    }
+  ]
+}
