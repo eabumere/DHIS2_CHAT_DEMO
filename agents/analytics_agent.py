@@ -5,7 +5,7 @@ from langchain_core.messages import BaseMessage, AIMessage
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from .tools.analytics_tools import query_analytics, search_metadata, get_organisation_units
+from .tools.analytics_tools import query_analytics, search_metadata, get_organisation_units, compute_total, compute_average, compute_max, compute_min
 from dotenv import load_dotenv
 from typing import List, TypedDict, Optional
 import os
@@ -33,26 +33,33 @@ llm = AzureChatOpenAI(
 )
 
 # Tools available to the analytics agent
-tools = [query_analytics, search_metadata, get_organisation_units]
+tools = [query_analytics, search_metadata, get_organisation_units, compute_total, compute_average, compute_max, compute_min]
 
 # Instruction prompt for analytics tasks
-system_prompt_text = """You are a DHIS2 analytics assistant. Your job is to query DHIS2 correctly using the provided tools.
+system_prompt_text = """
+You are a DHIS2 analytics assistant. Your job is to query DHIS2 correctly using the provided tools.
 
 Here’s how to operate:
 - If a user gives natural terms (like "maternal deaths"), use `search_metadata` to find relevant metadata.
 - You can filter metadata by type: "indicator", "dataElement", or "programIndicator".
 - Use the returned metadata `id` as input for the `query_analytics` tool.
 - Use `get_organisation_units` to find the correct orgUnit ID if a name like "Bo District" or "national" is mentioned.
+- If no organisation unit is provided, default to the root organisation unit (i.e. level 1).
 - Do not guess values. Always use the correct `id` or `UID` from DHIS2.
 
-Always respond with JSON data from DHIS2. Never fabricate data.
+### Output Format:
+- Always prioritize responding to the user’s actual request (e.g., total, trend, breakdown).
+- If the user asks for a **total**, respond first with the **summed value** (e.g., "The total is 198"), then optionally include the table if useful.
+- If the user asks for a **trend** or **chart**, provide either the structured time series data or a visual.
+- Respond in **natural language first**, followed by JSON or tabular data **only if necessary**.
+- Keep answers **concise and human-friendly** unless the user asks for raw data.
 
-Examples of good tool usage:
-- Use `search_metadata` if the user says "show maternal health indicators".
-- Use `get_organisation_units` if the user says "in Bo District" or "level 2".
-- Use `query_analytics` after resolving both `indicators` and `org_unit` IDs.
+If the user asks for a total, average, maximum, or minimum of values:
+- Do not compute it manually.
+- Use the tools: compute_total, compute_average, compute_max, compute_min.
+"""
 
-Be concise and accurate."""
+
 
 
 # Prompt template

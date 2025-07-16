@@ -20,7 +20,8 @@ embedding_model = AzureOpenAIEmbeddings(
 faiss_paths = [
     "faiss_search/index/",
     "tools/faiss_search/index/",
-    "agents/tools/faiss_search/index/"
+    "agents/tools/faiss_search/index/",
+    "index/"
 ]
 
 for path in faiss_paths:
@@ -67,7 +68,7 @@ def filter_documents_by_metadata(doc_type: str, filters: dict = None):
 
     return results
 
-#fiass_query("Live births")
+fiass_query("Maternal Deaths")
 # Get all org units with level == 2
 
 #Exact Match

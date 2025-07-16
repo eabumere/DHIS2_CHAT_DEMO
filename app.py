@@ -8,6 +8,8 @@ from langchain_core.messages import HumanMessage, AIMessage
 from multi_agent import metadata_agent_executor, analytics_executor, routing_decision
 
 # ========== Helpers ==========
+def generate_distinct_colors(n):
+    return [f"hsl({i * 360 / n}, 70%, 50%)" for i in range(n)]
 
 def analytics_to_dataframe(tool_data: dict) -> pd.DataFrame:
     if "data" not in tool_data:
@@ -33,7 +35,6 @@ def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
     grouped = df[df["dx"].isin(selected_indicators)]
-
     labels = sorted(grouped["pe"].unique().tolist())
     colors = ["#4285F4", "#DB4437", "#F4B400", "#0F9D58", "#AB47BC"]
     datasets = []
@@ -43,14 +44,24 @@ def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type
         subset_grouped = subset.groupby("pe")["value"].sum().reindex(labels).fillna(0)
         values = subset_grouped.tolist()
 
-        datasets.append({
-            "label": indicator,
-            "data": values,
-            "backgroundColor": colors[idx % len(colors)],
-            "borderColor": colors[idx % len(colors)],
-            "fill": chart_type != "line",
-            "tension": 0.3
-        })
+        if chart_type == "pie":
+            dynamic_colors = generate_distinct_colors(len(values))  # <-- dynamic color generation
+            datasets.append({
+                "label": indicator,
+                "data": values,
+                "backgroundColor": dynamic_colors,
+                "borderColor": "#fff",
+                "borderWidth": 1
+            })
+        else:
+            datasets.append({
+                "label": indicator,
+                "data": values,
+                "backgroundColor": colors[idx % len(colors)],
+                "borderColor": colors[idx % len(colors)],
+                "fill": chart_type != "line",
+                "tension": 0.3
+            })
 
     chart_config = {
         "type": chart_type,
@@ -63,22 +74,38 @@ def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type
             "maintainAspectRatio": False,
             "plugins": {
                 "legend": {"position": "top"},
-                "title": {"display": True, "text": "DHIS2 Analytics Chart"}
+                "title": {"display": True, "text": "DHIS2 Analytics Chart"},
+                "datalabels": {
+                    "anchor": "end",
+                    "align": "top",
+                    "color": "#000",
+                    "font": {"weight": "bold"},
+                    "formatter": "Math.round"
+                }
+            },
+            "scales": {
+                "y": {
+                    "beginAtZero": True
+                }
             }
-        }
+        },
+        "plugins": ["ChartDataLabels"]
     }
 
     chart_json = json.dumps(chart_config)
     html_code = f"""
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
     <canvas id="myChart" height="400"></canvas>
     <script>
     const ctx = document.getElementById('myChart').getContext('2d');
+    Chart.register(ChartDataLabels);
     new Chart(ctx, {chart_json});
     </script>
     """
-    st.subheader("📊 Chart Preview (Chart.js)")
+    st.subheader("📊 Chart Preview")
     components.html(html_code, height=500)
+
 
 
 def render_chart_matplotlib(df: pd.DataFrame, selected_indicators: list, chart_type: str):
@@ -141,29 +168,46 @@ def render_chart_plotly(df: pd.DataFrame, selected_indicators: list, chart_type:
 def chart_data(result_, chart_backend):
     raw_data = result_.get("raw_data", {})
 
-    # Always overwrite with real data
     df_chart_data = analytics_to_dataframe(raw_data)
     st.session_state.raw_data_df = df_chart_data
     raw_data_df = df_chart_data
 
     required_cols = {"pe", "value", "dx"}
+
+    # ✅ Check if required columns are present
     if not raw_data_df.empty and required_cols.issubset(raw_data_df.columns):
         with st.container():
+            # ✅ Build filter options
             indicators = raw_data_df["dx"].dropna().unique().tolist()
+            periods = sorted(raw_data_df["pe"].dropna().unique().tolist())
+            org_units = raw_data_df["ou"].dropna().unique().tolist() if "ou" in raw_data_df.columns else raw_data_df["Organisation unit"].dropna().unique().tolist()
+
+            # ✅ UI filters
             selected_indicators = st.multiselect("Select indicator(s)", indicators, default=indicators[:1])
+            selected_org_units = st.multiselect("Select org unit(s)", org_units, default=org_units)
+            selected_periods = st.multiselect("Select period(s)", periods, default=periods)
+
             chart_type = st.selectbox("Select chart type", ["bar", "line", "pie"])
 
-        if selected_indicators:
+        # ✅ Apply filters to the dataframe
+        filtered_df = raw_data_df[
+            raw_data_df["dx"].isin(selected_indicators) &
+            raw_data_df[raw_data_df.columns[2]].isin(selected_org_units) &  # Assuming "Organisation unit" is 3rd column
+            raw_data_df["pe"].isin(selected_periods)
+        ]
+
+        if selected_indicators and not filtered_df.empty:
             if chart_backend == "chartjs":
-                render_chart_chartjs(raw_data_df, selected_indicators, chart_type)
+                render_chart_chartjs(filtered_df, selected_indicators, chart_type)
             elif chart_backend == "matplotlib":
-                render_chart_matplotlib(raw_data_df, selected_indicators, chart_type)
+                render_chart_matplotlib(filtered_df, selected_indicators, chart_type)
             elif chart_backend == "plotly":
-                render_chart_plotly(raw_data_df, selected_indicators, chart_type)
+                render_chart_plotly(filtered_df, selected_indicators, chart_type)
         else:
-            st.info("Please select at least one indicator to display chart.")
+            st.info("No data for the selected filters.")
     else:
         st.warning("No valid data or required columns missing.")
+
 # ========== App UI ==========
 
 st.set_page_config(page_title="DHIS2 Assistant", layout="wide")

@@ -3,7 +3,7 @@ import os
 import requests
 from dotenv import load_dotenv
 # from faiss_search.search import fiass_query
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from langchain_core.documents import Document
 from langchain.tools import tool
 
@@ -158,6 +158,56 @@ def get_all(
 #     return get_all("programIndicators.json", "programIndicators")
 #
 #
+
+
+@tool
+def compute_total(values: List[Union[str, float, int]]) -> Union[float, Any]:
+    """
+    Compute the total sum of a list of values. Handles string numbers too.
+    """
+    try:
+        return sum(float(v) for v in values if v is not None and str(v).strip() != "")
+    except Exception as e:
+        return f"Error computing total: {e}"
+
+@tool
+def compute_average(values: List[Union[str, float, int]]) -> Union[float, Any]:
+    """
+    Compute the average (mean) of a list of values.
+    Ignores null/blank values and handles strings.
+    """
+    try:
+        numeric_values = [float(v) for v in values if v is not None and str(v).strip() != ""]
+        if not numeric_values:
+            return 0.0
+        return sum(numeric_values) / len(numeric_values)
+    except Exception as e:
+        return f"Error computing average: {e}"
+
+@tool
+def compute_max(values: List[Union[str, float, int]]) -> Union[float, Any]:
+    """
+    Compute the maximum value in a list.
+    Handles string numbers and ignores blanks/nulls.
+    """
+    try:
+        numeric_values = [float(v) for v in values if v is not None and str(v).strip() != ""]
+        return max(numeric_values) if numeric_values else 0.0
+    except Exception as e:
+        return f"Error computing max: {e}"
+
+@tool
+def compute_min(values: List[Union[str, float, int]]) -> Union[float, Any]:
+    """
+    Compute the minimum value in a list.
+    Handles string numbers and ignores blanks/nulls.
+    """
+    try:
+        numeric_values = [float(v) for v in values if v is not None and str(v).strip() != ""]
+        return min(numeric_values) if numeric_values else 0.0
+    except Exception as e:
+        return f"Error computing min: {e}"
+
 @tool
 def get_organisation_units(filters: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """
@@ -170,7 +220,8 @@ def get_organisation_units(filters: Optional[Dict[str, str]] = None) -> List[Dic
     return get_all(
         endpoint="organisationUnits.json",
         key="organisationUnits",
-        fields="id,code,name,parent,children,level,path,ancestors",
+        fields="id,name,level",
+        # fields="id,code,name,parent,children,level,path,ancestors",
         filters=filters
     )
 
