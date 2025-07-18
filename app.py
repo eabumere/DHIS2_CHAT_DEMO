@@ -21,6 +21,9 @@ def analytics_to_dataframe(tool_data: dict) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+import base64
+
+
 def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type: str):
     if df.empty or not selected_indicators:
         st.info("No data available or indicators selected.")
@@ -45,7 +48,7 @@ def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type
         values = subset_grouped.tolist()
 
         if chart_type == "pie":
-            dynamic_colors = generate_distinct_colors(len(values))  # <-- dynamic color generation
+            dynamic_colors = generate_distinct_colors(len(values))
             datasets.append({
                 "label": indicator,
                 "data": values,
@@ -93,19 +96,56 @@ def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type
     }
 
     chart_json = json.dumps(chart_config)
+
+    # Encode CSV data as base64 for safe injection
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    csv_b64 = base64.b64encode(csv_bytes).decode("utf-8")
+
     html_code = f"""
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
-    <canvas id="myChart" height="400"></canvas>
+
+    <div style="position: relative; height: 400px;">
+        <canvas id="myChart"></canvas>
+    </div>
+
+    <div style="margin-top: 10px;">
+        <button onclick="downloadChart()" style="padding: 8px 16px; font-size: 14px; margin-right: 10px;">
+            📥 Download Chart as PNG
+        </button>
+        <button onclick="downloadCSV()" style="padding: 8px 16px; font-size: 14px;">
+            📥 Download Data as CSV
+        </button>
+    </div>
+
     <script>
     const ctx = document.getElementById('myChart').getContext('2d');
     Chart.register(ChartDataLabels);
     new Chart(ctx, {chart_json});
+
+    function downloadChart() {{
+        const link = document.createElement('a');
+        link.download = 'chart.png';
+        link.href = document.getElementById('myChart').toDataURL('image/png');
+        link.click();
+    }}
+
+    function downloadCSV() {{
+        const csvData = atob("{csv_b64}");
+        const blob = new Blob([csvData], {{ type: 'text/csv;charset=utf-8;' }});
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.setAttribute('href', url);
+        link.setAttribute('download', 'filtered_data.csv');
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }}
     </script>
     """
+
     st.subheader("📊 Chart Preview")
     components.html(html_code, height=500)
-
 
 
 def render_chart_matplotlib(df: pd.DataFrame, selected_indicators: list, chart_type: str):
@@ -167,7 +207,9 @@ def render_chart_plotly(df: pd.DataFrame, selected_indicators: list, chart_type:
 
 def chart_data(result_, chart_backend):
     raw_data = result_.get("raw_data", {})
-
+    if raw_data is None:
+        st.warning("No visualization data returned from the analytics executor.")
+        return
     df_chart_data = analytics_to_dataframe(raw_data)
     st.session_state.raw_data_df = df_chart_data
     raw_data_df = df_chart_data
@@ -195,6 +237,7 @@ def chart_data(result_, chart_backend):
             raw_data_df[raw_data_df.columns[2]].isin(selected_org_units) &  # Assuming "Organisation unit" is 3rd column
             raw_data_df["pe"].isin(selected_periods)
         ]
+
 
         if selected_indicators and not filtered_df.empty:
             if chart_backend == "chartjs":
@@ -235,6 +278,9 @@ if "messages" not in st.session_state:
 if "show_chart" not in st.session_state:
     st.session_state.show_chart = False
 
+if "show_suggestion_options" not in st.session_state:
+    st.session_state.show_suggestion_options = False
+
 for msg in st.session_state.messages:
     role = "assistant" if isinstance(msg, AIMessage) else "user"
     with st.chat_message(role):
@@ -251,21 +297,88 @@ if prompt := st.chat_input("Ask DHIS2 Assistant..."):
 
     if route == "metadata":
         result = metadata_agent_executor.invoke(state)
+        output = result.get("output")
+        assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+        st.session_state.messages.append(assistant_msg)
+        with st.chat_message("assistant"):
+            st.markdown(assistant_msg.content)
     elif route == "analytics":
         result = analytics_executor.invoke(state)
-        st.session_state.result = result  # Store result in session state
-        st.session_state.show_chart = True
+        metadata_result = result.get("metadata_result", "")
+
+
+        if metadata_result and metadata_result.get("status") == "multiple_matches":
+            suggestions = metadata_result["suggestions"]
+            st.session_state.suggestions = suggestions
+            st.session_state.show_suggestion_options = True
+
+
+        else:
+            st.session_state.result = result
+            st.session_state.show_chart = True
+            output = result.get("output")
+
+            assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+            st.session_state.messages.append(assistant_msg)
+            with st.chat_message("assistant"):
+                st.markdown(assistant_msg.content)
+
     else:
         error_msg = AIMessage(content="❌ Unknown routing decision.")
         st.session_state.messages.append(error_msg)
         st.chat_message("assistant").markdown(error_msg.content)
         st.stop()
 
-    output = result.get("output")
-    assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
-    st.session_state.messages.append(assistant_msg)
-    with st.chat_message("assistant"):
-        st.markdown(assistant_msg.content)
+
 
 if st.session_state.get("show_chart", False):
     chart_data(st.session_state.result, "chartjs")
+
+# Show metadata options after user prompt
+if st.session_state.get("show_suggestion_options", False):
+    with st.chat_message("assistant"):
+        st.markdown("There are multiple metadata matches. Please choose one:")
+
+        for i, option in enumerate(st.session_state.suggestions):
+            label = f"{option['name']} ({option['doc_type']})"
+            if st.button(label, key=f"metadata_option_{i}"):
+                st.session_state.selected_metadata = option  # Store full dict (id, name, doc_type, score)
+                st.session_state.trigger_metadata_retry = True  # 🔁 trigger new processing
+                st.session_state.show_suggestion_options = False
+                st.rerun()
+
+if st.session_state.get("trigger_metadata_retry"):
+    selected = st.session_state.selected_metadata
+
+    user_msg = HumanMessage(content=selected["id"])
+    st.session_state.messages.append(user_msg)
+
+    with st.chat_message("user"):
+        st.markdown(selected["name"])
+
+    # # 💡 Inject selected metadata directly
+    # state = {
+    #     "messages": st.session_state.messages,
+    #     "metadata_result": {
+    #         "status": "auto_selected",
+    #         "selected": selected
+    #     }
+    # }
+    # print(state)
+    state = {"messages": st.session_state.messages}
+
+    result = analytics_executor.invoke(state)
+
+    st.session_state.result = result
+    st.session_state.show_chart = True
+    st.session_state.trigger_metadata_retry = False
+
+    output = result.get("output")
+    assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+    st.session_state.messages.append(assistant_msg)
+
+    with st.chat_message("assistant"):
+        st.markdown(assistant_msg.content)
+
+    st.rerun()  # ✅ Force full rerun so chart displays
+

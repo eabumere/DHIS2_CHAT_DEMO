@@ -19,6 +19,8 @@ class AgentState(TypedDict):
     messages: List[BaseMessage]
     output: Optional[AIMessage]
     raw_data: dict  # or: Any, if it can vary
+    metadata_result: Optional[dict]  # For search_metadata tool result
+    selected_metadata_id: Optional[str]  # Explicit metadata id to skip re-query
 
 
 
@@ -39,25 +41,67 @@ tools = [query_analytics, search_metadata, get_organisation_units, compute_total
 system_prompt_text = """
 You are a DHIS2 analytics assistant. Your job is to query DHIS2 correctly using the provided tools.
 
-Here’s how to operate:
-- If a user gives natural terms (like "maternal deaths"), use `search_metadata` to find relevant metadata.
-- You can filter metadata by type: "indicator", "dataElement", or "programIndicator".
-- Use the returned metadata `id` as input for the `query_analytics` tool.
-- Use `get_organisation_units` to find the correct orgUnit ID if a name like "Bo District" or "national" is mentioned.
-- If no organisation unit is provided, default to the root organisation unit (i.e. level 1).
-- Do not guess values. Always use the correct `id` or `UID` from DHIS2.
+Your main goals:
+- Interpret user queries.
+- Identify the correct metadata (e.g., indicator or data element).
+- Use that metadata ID to fetch analytics data via the tools provided.
+- Respond clearly and accurately with user-friendly summaries of the result.
 
-### Output Format:
-- Always prioritize responding to the user’s actual request (e.g., total, trend, breakdown).
-- If the user asks for a **total**, respond first with the **summed value** (e.g., "The total is 198"), then optionally include the table if useful.
-- If the user asks for a **trend** or **chart**, provide either the structured time series data or a visual.
-- Respond in **natural language first**, followed by JSON or tabular data **only if necessary**.
-- Keep answers **concise and human-friendly** unless the user asks for raw data.
+---
 
-If the user asks for a total, average, maximum, or minimum of values:
-- Do not compute it manually.
-- Use the tools: compute_total, compute_average, compute_max, compute_min.
+### Metadata Lookup Rules
+
+- If the user gives natural terms (e.g., "maternal deaths"), you should call `search_metadata` to find the best match.
+- However, **if `metadata_result.selected` or `selected_metadata_id` is provided**, **you must skip** calling `search_metadata`.
+- In this case, **treat `metadata_result.selected` as final** and use its `id` directly as input to `query_analytics`.
+- Do not attempt to re-infer or guess a different metadata match. Assume it is confirmed by the user.
+- If multiple metadata matches are returned by `search_metadata`, allow the user (via UI) to choose — and then re-run the flow with `metadata_result.selected` set.
+
+---
+
+### Org Unit Logic
+
+- If the user provides a location like "Bo District" or "national", call `get_organisation_units` to look up the correct orgUnit ID.
+- If no location is given, default to the root org unit (i.e., level 1 in DHIS2).
+
+---
+
+### Analytics Queries
+
+- Use `query_analytics` with these required inputs:
+  - `indicators`: List of IDs (e.g., from selected metadata)
+  - `periods`: Must be derived from temporal context or default to LAST_12_MONTHS
+  - `org_units`: Based on resolved location or fallback to root
+
+---
+
+### Output Guidelines
+
+- If the user asks for a **total**, respond clearly with the **summed value** (e.g., “There were 123 maternal deaths in the past 12 months.”).
+- If they request a **trend** or **chart**, structure the output to support that (e.g., JSON timeseries).
+- Respond in **natural, friendly language first**, and optionally follow with data or tables if needed.
+- Keep answers concise, factual, and relevant unless the user asks for more detail or raw output.
+
+---
+
+### DO NOT:
+
+- Do not call `search_metadata` if `metadata_result.selected` or `selected_metadata_id` is present.
+- Do not fabricate IDs or values. Only use values returned by tools.
+- Do not guess metadata or orgUnit IDs from names — use tool lookups instead.
+
+---
+
+### Special Cases
+
+- If the user asks for a total, average, max, or min:
+  - Use: `compute_total`, `compute_average`, `compute_max`, or `compute_min`.
+  - Do not manually calculate these in Python or LLM.
+
+Your job is to act like an intelligent bridge between human-friendly input and machine-structured data tools.
 """
+
+
 
 
 
@@ -138,6 +182,8 @@ def agent_node(state: AgentState) -> AgentState:
         if isinstance(result, dict):
             response_msg = None
             tool_output = None
+            metadata_tool_result = None  # ✅ initialize safely
+
 
             # Final response message
             if "output" in result:
@@ -152,8 +198,11 @@ def agent_node(state: AgentState) -> AgentState:
             # Capture tool output if available
             if "intermediate_steps" in result:
                 for step in result["intermediate_steps"]:
-                    if isinstance(step, tuple) and step[0].tool == "query_analytics":
-                        tool_output = step[1]  # This is the return value of your tool
+                    if isinstance(step, tuple):
+                        if step[0].tool == "query_analytics":
+                            tool_output = step[1]
+                        elif step[0].tool == "search_metadata":
+                            metadata_tool_result = step[1]
 
             # Add both message and raw tool output to state
             # return {
@@ -167,7 +216,8 @@ def agent_node(state: AgentState) -> AgentState:
             return {
                 "messages": state["messages"] + [response_msg],
                 "output": response_msg,
-                "raw_data": tool_output
+                "raw_data": tool_output,
+                "metadata_result": metadata_tool_result  # <-- Include structured search_metadata result
 
             }
 

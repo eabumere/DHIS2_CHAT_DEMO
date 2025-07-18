@@ -19,7 +19,9 @@ load_dotenv()
 DHIS2_BASE_URL = os.getenv("DHIS2_BASE_URL")
 DHIS2_USERNAME = os.getenv("DHIS2_USERNAME")
 DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD")
-
+# Define confidence threshold and convert to float
+# FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", "0.12"))
+FAISS_THRESHOLD = 0.25  # TEMPORARY for testing
 
 @tool
 def query_analytics(
@@ -42,6 +44,7 @@ def query_analytics(
     #     include_num_den: Include numerator/denominator (default: True)
     #     skip_data: Skip data section (default: False)
     #     output_id_scheme: Output ID scheme (e.g., "NAME")
+
 
     indicator_string = ";".join(indicators)
     period_string = ";".join(periods)
@@ -77,27 +80,45 @@ def query_analytics(
 
 
 @tool
-def search_metadata(query: str) -> List[Dict[str, str]]:
+def search_metadata(query: str) -> Dict[str, Any]:
     """
     Searches metadata using vector similarity based on the query string.
-    Returns matched results with inferred doc_type, name, id, and score.
+    Returns either a single match or a list of high-confidence options for user selection.
     """
     try:
         docs_and_scores: List[Document] = vectorstore.similarity_search_with_score(query, k=5)
-        suggestions = []
+        filtered_matches = []
 
         for doc, score in docs_and_scores:
-            metadata = doc.metadata
-            suggestions.append({
-                "name": metadata.get("name", ""),
-                "id": metadata.get("id", ""),
-                "doc_type": metadata.get("type", "Unknown"),
-                "score": score
-            })
+            if score <= FAISS_THRESHOLD:
+                metadata = doc.metadata
+                filtered_matches.append({
+                    "name": metadata.get("name", ""),
+                    "id": metadata.get("id", ""),
+                    "doc_type": metadata.get("type", "Unknown"),
+                    "score": float(score)
+                })
 
-        return suggestions
+        if not filtered_matches:
+            return {
+                "status": "no_match",
+                "message": f"No indicator match found with score ≤ {FAISS_THRESHOLD}.",
+                "suggestions": []
+            }
+
+        if len(filtered_matches) == 1:
+            return {
+                "status": "auto_selected",
+                "selected": filtered_matches[0]
+            }
+
+        return {
+            "status": "multiple_matches",
+            "suggestions": filtered_matches
+        }
+
     except Exception as e:
-        return [{"error": str(e)}]
+        return {"status": "error", "message": str(e)}
 
 def get_all(
     endpoint: str,
