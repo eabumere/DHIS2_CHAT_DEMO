@@ -20,7 +20,7 @@ DHIS2_BASE_URL = os.getenv("DHIS2_BASE_URL")
 DHIS2_USERNAME = os.getenv("DHIS2_USERNAME")
 DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD")
 # Define confidence threshold and convert to float
-# FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", "0.12"))
+# FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", 0.12))
 FAISS_THRESHOLD = 0.25  # TEMPORARY for testing
 
 @tool
