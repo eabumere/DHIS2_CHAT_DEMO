@@ -68,7 +68,7 @@ def filter_documents_by_metadata(doc_type: str, filters: dict = None):
 
     return results
 
-# fiass_query("Maternal Deaths")
+# fiass_query("FUrCpcvMAmC")
 # Get all org units with level == 2
 
 #Exact Match

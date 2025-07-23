@@ -162,6 +162,7 @@ def read_response(response_json):
     type_reports = response_json.get("response", {}).get("typeReports", [])
     created_items = []
     updated_items = []
+    deleted_items = []
 
     for report in type_reports:
         klass = report.get("klass", "Unknown")
@@ -170,17 +171,22 @@ def read_response(response_json):
         stats = report.get("stats", {})
         created = stats.get("created", 0)
         updated = stats.get("updated", 0)
+        deleted = stats.get("deleted", 0)
 
         if created:
             created_items.append(f"{created} {friendly_name}")
         if updated:
             updated_items.append(f"{updated} {friendly_name}")
+        if deleted:
+            deleted_items.append(f"{deleted} {friendly_name}")
 
     message_parts = []
     if created_items:
         message_parts.append("Created: " + ", ".join(created_items))
     if updated_items:
         message_parts.append("Updated: " + ", ".join(updated_items))
+    if deleted_items:
+        message_parts.append("Updated: " + ", ".join(deleted_items))
 
     message = "; ".join(message_parts) if message_parts else "No changes made."
 
@@ -188,6 +194,7 @@ def read_response(response_json):
         "status": "success",
         "createdItems": created_items,
         "updatedItems": updated_items,
+        "deletedItems": deleted_items,
         "message": message
     }, indent=2)
 

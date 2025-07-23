@@ -7,6 +7,9 @@ from .tools.metadata_tools import create_metadata, get_dhis2_metadata, delete_me
 from dotenv import load_dotenv
 from typing import List, TypedDict
 import os
+from typing import List, TypedDict, Optional
+
+from utils.llm import get_llm
 
 # Load environment variables from .env
 load_dotenv()
@@ -14,16 +17,11 @@ load_dotenv()
 # Define state structure
 class AgentState(TypedDict):
     messages: List[BaseMessage]
+    output: Optional[AIMessage]
+
 
 # --- Azure OpenAI LLM setup ---
-llm = AzureChatOpenAI(
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_GPT_4O"),
-    openai_api_version=os.getenv("OPENAI_API_VERSION"),
-    model="gpt-4",
-    temperature=0,
-    max_tokens=4000,
-)
+llm = get_llm()
 
 
 # --- Agent and Tools Setup ---
@@ -204,15 +202,17 @@ openai_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 def agent_node(state: AgentState) -> AgentState:
     try:
         result = openai_executor.invoke(state)  # Pass full state with all messages
-        return {"messages": result["messages"]}  # Ensure state gets updated
+        # print(result)
+        return {"messages": result["messages"], "output": result["output"]}  # Ensure state gets updated
     except Exception as e:
         error_message = f"❌ Error: {str(e)}"
         messages = state["messages"] + [AIMessage(content=error_message)]
-        return {"messages": messages}
+        output = state["output"]
+        return {"messages": messages, "output": output}
 
 # --- Graph ---
 graph = StateGraph(AgentState)
 graph.add_node("agent", agent_node)
 graph.set_entry_point("agent")
 graph.add_edge("agent", END)
-compiled_graph = graph.compile()
+metadata_agent_executor = graph.compile()

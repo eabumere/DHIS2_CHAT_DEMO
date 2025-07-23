@@ -5,7 +5,14 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 import streamlit.components.v1 as components
 from langchain_core.messages import HumanMessage, AIMessage
-from multi_agent import metadata_agent_executor, analytics_executor, routing_decision
+from multi_agent import (
+    metadata_agent_executor,
+    analytics_executor,
+    data_entry_executor,
+    event_data_executor,
+    tracker_data_executor,
+    routing_decision
+)
 
 # ========== Helpers ==========
 def generate_distinct_colors(n):
@@ -297,11 +304,6 @@ if prompt := st.chat_input("Ask DHIS2 Assistant..."):
 
     if route == "metadata":
         result = metadata_agent_executor.invoke(state)
-        output = result.get("output")
-        assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
-        st.session_state.messages.append(assistant_msg)
-        with st.chat_message("assistant"):
-            st.markdown(assistant_msg.content)
     elif route == "analytics":
         result = analytics_executor.invoke(state)
         metadata_result = result.get("metadata_result", "")
@@ -316,19 +318,26 @@ if prompt := st.chat_input("Ask DHIS2 Assistant..."):
         else:
             st.session_state.result = result
             st.session_state.show_chart = True
-            output = result.get("output")
 
-            assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
-            st.session_state.messages.append(assistant_msg)
-            with st.chat_message("assistant"):
-                st.markdown(assistant_msg.content)
 
+    elif route == "data_entry":
+        result = data_entry_executor.invoke(state)
+    elif route == "event_data":
+        result = event_data_executor.invoke(state)
+    elif route == "tracker_data":
+        result = tracker_data_executor.invoke(state)
     else:
         error_msg = AIMessage(content="❌ Unknown routing decision.")
         st.session_state.messages.append(error_msg)
         st.chat_message("assistant").markdown(error_msg.content)
         st.stop()
 
+    if len(st.session_state.suggestions) < 1:
+        output = result.get("output")
+        assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+        st.session_state.messages.append(assistant_msg)
+        with st.chat_message("assistant"):
+            st.markdown(assistant_msg.content)
 
 
 if st.session_state.get("show_chart", False):
@@ -350,23 +359,27 @@ if st.session_state.get("show_suggestion_options", False):
 if st.session_state.get("trigger_metadata_retry"):
     selected = st.session_state.selected_metadata
 
-    user_msg = HumanMessage(content=selected["id"])
-    st.session_state.messages.append(user_msg)
+    # Reconstruct the last actual user question
+    original_user_msg = ""
+    for msg in reversed(st.session_state.messages):
+        if isinstance(msg, HumanMessage):
+            original_user_msg = msg.content
+            break
+
+    # Build a clearer retry message with metadata reference
+    augmented_msg = HumanMessage(
+        # content=f"{original_user_msg} (selected: {selected['id']} - {selected['name']})"
+        content = f"{selected['doc_type']} selected:  {selected['name']} -  {selected['id']})"
+
+    )
+
+    st.session_state.messages.append(augmented_msg)
 
     with st.chat_message("user"):
-        st.markdown(selected["name"])
+        st.markdown(original_user_msg)  # ✅ Show only original question in UI
 
-    # # 💡 Inject selected metadata directly
-    # state = {
-    #     "messages": st.session_state.messages,
-    #     "metadata_result": {
-    #         "status": "auto_selected",
-    #         "selected": selected
-    #     }
-    # }
-    # print(state)
+    # Re-invoke agent
     state = {"messages": st.session_state.messages}
-
     result = analytics_executor.invoke(state)
 
     st.session_state.result = result
@@ -380,5 +393,6 @@ if st.session_state.get("trigger_metadata_retry"):
     with st.chat_message("assistant"):
         st.markdown(assistant_msg.content)
 
-    st.rerun()  # ✅ Force full rerun so chart displays
+    st.rerun()  # ✅ Force chart to render
+
 

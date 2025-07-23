@@ -9,7 +9,7 @@ from .tools.analytics_tools import query_analytics, search_metadata, get_organis
 from dotenv import load_dotenv
 from typing import List, TypedDict, Optional
 import os
-
+from utils.llm import get_llm
 # Load environment variables
 load_dotenv()
 
@@ -25,14 +25,7 @@ class AgentState(TypedDict):
 
 
 # Set up the LLM (Azure OpenAI GPT-4)
-llm = AzureChatOpenAI(
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_GPT_4O"),
-    openai_api_version=os.getenv("OPENAI_API_VERSION"),
-    model="gpt-4",
-    temperature=0,
-    max_tokens=4000,
-)
+llm = get_llm()
 
 # Tools available to the analytics agent
 tools = [query_analytics, search_metadata, get_organisation_units, compute_total, compute_average, compute_max, compute_min]
