@@ -1,0 +1,20 @@
+{
+  "dataSets": [
+    {
+      "id": "immSCXkTpQU",
+      "name": "Monthly Summary - TBA",
+      "shortName": "Monthly Summary - TBA",
+      "periodType": "Monthly",
+      "categoryCombo": {
+        "id": "O7NbiTnIpaE"
+      },
+      "dataSetElements": [
+        {
+          "dataElement": {
+            "id": "iwwGuv4irps"
+          }
+        }
+      ]
+    }
+  ]
+}
