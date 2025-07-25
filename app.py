@@ -13,6 +13,7 @@ from multi_agent import (
     tracker_data_executor,
     routing_decision
 )
+from agents.tools.faiss_search.embed_dhis2_faiss_metadata import run_embedding
 
 # ========== Helpers ==========
 def generate_distinct_colors(n):
@@ -42,6 +43,10 @@ def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type
         "Organisation unit": "ou",
         "Value": "value"
     })
+    # Handle optional category option combo column
+    if "co" in df.columns:
+        df = df.rename(columns={"co": "Category option combo"})
+
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
     grouped = df[df["dx"].isin(selected_indicators)]
@@ -217,34 +222,65 @@ def chart_data(result_, chart_backend):
     if raw_data is None:
         st.warning("No visualization data returned from the analytics executor.")
         return
+
     df_chart_data = analytics_to_dataframe(raw_data)
     st.session_state.raw_data_df = df_chart_data
     raw_data_df = df_chart_data
 
-    required_cols = {"pe", "value", "dx"}
+    # Base required columns
+    base_required_cols = {"dx", "pe", "value"}
 
-    # ✅ Check if required columns are present
+    # Columns to exclude (known standard fields)
+    excluded_cols = {"dx", "pe", "ou", "value", "numerator", "denominator", "factor", "multiplier", "divisor"}
+
+    # Detect up to 3 disaggregation columns (e.g., category option combos)
+    disagg_cols = [col for col in raw_data_df.columns if col not in excluded_cols][:3]
+
+    # Add disaggregation columns to required cols
+    required_cols = base_required_cols.union(disagg_cols)
+
     if not raw_data_df.empty and required_cols.issubset(raw_data_df.columns):
         with st.container():
-            # ✅ Build filter options
             indicators = raw_data_df["dx"].dropna().unique().tolist()
             periods = sorted(raw_data_df["pe"].dropna().unique().tolist())
-            org_units = raw_data_df["ou"].dropna().unique().tolist() if "ou" in raw_data_df.columns else raw_data_df["Organisation unit"].dropna().unique().tolist()
+            org_units = (
+                raw_data_df["ou"].dropna().unique().tolist()
+                if "ou" in raw_data_df.columns
+                else raw_data_df["Organisation unit"].dropna().unique().tolist()
+            )
 
-            # ✅ UI filters
+            # Rename disaggregation columns to co_1, co_2, etc.
+            co_col_map = {}  # e.g. {'co_1': 'cX5k9anHEHd'}
+            for idx, col in enumerate(disagg_cols):
+                co_name = f"co_{idx + 1}"
+                raw_data_df.rename(columns={col: co_name}, inplace=True)
+                co_col_map[co_name] = col
+
+            # Filters
             selected_indicators = st.multiselect("Select indicator(s)", indicators, default=indicators[:1])
             selected_org_units = st.multiselect("Select org unit(s)", org_units, default=org_units)
             selected_periods = st.multiselect("Select period(s)", periods, default=periods)
 
+            # Multiselect filters for each co_*
+            selected_cos = {}
+            for co_col in co_col_map:
+                co_values = raw_data_df[co_col].dropna().unique().tolist()
+                selected_ = st.multiselect(f"Filter by category option: {co_col}", co_values, default=co_values)
+                selected_cos[co_col] = selected_
+
             chart_type = st.selectbox("Select chart type", ["bar", "line", "pie"])
 
-        # ✅ Apply filters to the dataframe
+        # Apply all filters
         filtered_df = raw_data_df[
             raw_data_df["dx"].isin(selected_indicators) &
-            raw_data_df[raw_data_df.columns[2]].isin(selected_org_units) &  # Assuming "Organisation unit" is 3rd column
-            raw_data_df["pe"].isin(selected_periods)
+            raw_data_df["pe"].isin(selected_periods) &
+            raw_data_df[raw_data_df.columns[2]].isin(selected_org_units)
         ]
 
+        # Apply co_* filters
+        for co_col, selected_vals in selected_cos.items():
+            if selected_vals:
+                filtered_df = filtered_df[filtered_df[co_col].isin(selected_vals)]
 
         if selected_indicators and not filtered_df.empty:
             if chart_backend == "chartjs":
@@ -258,9 +294,40 @@ def chart_data(result_, chart_backend):
     else:
         st.warning("No valid data or required columns missing.")
 
+
+
+
+
+
 # ========== App UI ==========
 
 st.set_page_config(page_title="DHIS2 Assistant", layout="wide")
+# ========== Side Bar ==========
+# ===== Initialize session state =====
+if "side_bar_open" not in st.session_state:
+    st.session_state.side_bar_open = False
+if "side_bar_open_button" not in st.session_state:
+    st.session_state.side_bar_open_button = True
+
+if st.session_state.get("side_bar_open_button"):
+    if st.button("🛠️"):
+        st.session_state.side_bar_open = True
+
+if st.session_state.get("side_bar_open"):
+    # Simulate a menu using the sidebar
+    st.session_state.side_bar_open_button = False
+    with st.sidebar:
+        st.header("Settings")
+        # if st.button("▶ Run Script"):
+        #     # result = run_my_code()
+        #     st.success("Button pressed")
+        with st.expander("⚙️ Advanced Options"):
+            if st.button("Run Metadata Embedder"):
+                with st.spinner("Embedding and indexing metadata..."):
+                    run_embedding()
+                st.success("Metadata embedded.")
+
+
 
 col1, col2 = st.columns([1, 5])
 with col1:
@@ -278,10 +345,25 @@ if upload_file is not None:
     st.write("✅ File uploaded:", upload_file.name)
     st.write(df)
 
+# ========== Side bar =============
+
+# # Simulate a menu using the sidebar
+# with st.sidebar:
+#     st.header("Settings")
+#     # if st.button("▶ Run Script"):
+#     #     # result = run_my_code()
+#     #     st.success("Button pressed")
+#     with st.expander("⚙️ Advanced Options"):
+#         if st.button("Run Metadata Embedder"):
+#             with st.spinner("Embedding and indexing metadata..."):
+#                 run_embedding()
+#             st.success("Metadata embedded.")
+
 # Chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
+if "suggestions" not in st.session_state:
+    st.session_state.suggestions = []
 if "show_chart" not in st.session_state:
     st.session_state.show_chart = False
 

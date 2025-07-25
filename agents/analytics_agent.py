@@ -5,7 +5,7 @@ from langchain_core.messages import BaseMessage, AIMessage
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from .tools.analytics_tools import query_analytics, search_metadata, get_organisation_units, compute_total, compute_average, compute_max, compute_min
+from .tools.analytics_tools import query_analytics, search_metadata, get_organisation_units, compute_total, compute_average, compute_max, compute_min, get_data_elements
 from dotenv import load_dotenv
 from typing import List, TypedDict, Optional
 import os
@@ -28,7 +28,7 @@ class AgentState(TypedDict):
 llm = get_llm()
 
 # Tools available to the analytics agent
-tools = [query_analytics, search_metadata, get_organisation_units, compute_total, compute_average, compute_max, compute_min]
+tools = [query_analytics, search_metadata, get_organisation_units, compute_total, compute_average, compute_max, compute_min, get_data_elements]
 
 # Instruction prompt for analytics tasks
 system_prompt_text = """
@@ -44,7 +44,7 @@ Your main goals:
 
 ### Metadata Lookup Rules
 
-- If the user gives natural terms (e.g., "maternal deaths"), you should call `search_metadata` to find the best match.
+- If the user gives natural terms (e.g., "maternal deaths") or user gives CODE (e.g., "HTS_TST"), you should call `search_metadata` to find the best match.
 - However, **if `metadata_result.selected` or `selected_metadata_id` is provided**, **you must skip** calling `search_metadata`.
 - In this case, **treat `metadata_result.selected` as final** and use its `id` directly as input to `query_analytics`.
 - Do not attempt to re-infer or guess a different metadata match. Assume it is confirmed by the user.
@@ -65,6 +65,12 @@ Your main goals:
   - `indicators`: List of IDs (e.g., from selected metadata)
   - `periods`: Must be derived from temporal context or default to LAST_12_MONTHS
   - `org_units`: Based on resolved location or fallback to root
+- If the metadata has **category combinations** (disaggregations):
+  - Pass them as the `disaggregations` argument to `query_analytics`
+  - This is a dictionary where:
+    - The key is the **category ID**
+    - The value is a list of selected **category option IDs**
+  - If the user specifies dimensions like "by gender", "by age", or specific disaggregated options, you must include the corresponding category and options.
 
 ---
 
@@ -82,6 +88,7 @@ Your main goals:
 - Do not call `search_metadata` if `metadata_result.selected` or `selected_metadata_id` is present.
 - Do not fabricate IDs or values. Only use values returned by tools.
 - Do not guess metadata or orgUnit IDs from names — use tool lookups instead.
+- Do not hardcode disaggregation IDs. Always extract them from the metadata.
 
 ---
 
@@ -93,11 +100,6 @@ Your main goals:
 
 Your job is to act like an intelligent bridge between human-friendly input and machine-structured data tools.
 """
-
-
-
-
-
 
 # Prompt template
 prompt = ChatPromptTemplate.from_messages([
