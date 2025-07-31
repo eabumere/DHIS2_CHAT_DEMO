@@ -5,6 +5,11 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 import streamlit.components.v1 as components
 from langchain_core.messages import HumanMessage, AIMessage
+import os
+import base64
+from fuzzysearch import find_near_matches
+import requests
+from dotenv import load_dotenv
 from multi_agent import (
     metadata_agent_executor,
     analytics_executor,
@@ -14,22 +19,187 @@ from multi_agent import (
     routing_decision
 )
 from agents.tools.faiss_search.embed_dhis2_faiss_metadata import run_embedding
+from agents.tools.analytics_tools import get_all
+
+load_dotenv()
+
+# Load environment variables
+
+DHIS2_BASE_URL = os.getenv("DHIS2_BASE_URL")
+DHIS2_USERNAME = os.getenv("DHIS2_USERNAME")
+DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD")
 
 # ========== Helpers ==========
 def generate_distinct_colors(n):
     return [f"hsl({i * 360 / n}, 70%, 50%)" for i in range(n)]
 
-def analytics_to_dataframe(tool_data: dict) -> pd.DataFrame:
+
+
+def get_data(url, doc_type, disaggregations, indicators, periods, org_units):
+    flattened = []
+    org_units_lookup = []
+    indicator_string = ";".join(indicators)
+    period_string = ";".join(periods)
+    org_unit_string = ";".join(org_units)
+
+    if len(org_units) > 0:
+        get_the_org = get_all(
+            endpoint="organisationUnits.json",
+            key="organisationUnits",
+            fields="id,name",
+            # fields="id,code,name,parent,children,level,path,ancestors",
+            filters={"id": f"in:[{','.join(org_units)}]"}
+        )
+        print("+++++ get_the_org ++++")
+        print(get_the_org)
+
+        for org in get_the_org:
+            org_units_lookup.append({
+                "org": org["name"],
+                "org_id": org["id"],
+            })
+    print("+++ org_units +++")
+    print(org_units)
+    print("+++ org_units_lookup +++")
+    print(org_units_lookup)
+
+
+    dimensions = [
+        f"dx:{indicator_string}",
+        f"pe:{period_string}",
+        f"ou:{org_unit_string}"
+    ]
+    if doc_type == "indicator":
+        include_num_den = True
+        include_coc_dimension = False
+    elif doc_type == "dataElement":
+        get_the_de = get_all(
+            endpoint="dataElements.json",
+            key="dataElements",
+            fields="id,name,categoryCombo[id,name,categories[id,name,categoryOptions[id,name]]]",
+            # fields="id,code,name,parent,children,level,path,ancestors",
+            filters={"id": f"in:[{','.join(indicators)}]"}
+        )
+
+        for de in get_the_de:
+            categories = de.get("categoryCombo", {}).get("categories", {})
+            # Flatten the structure
+            for category in categories:
+                for option_ in category["categoryOptions"]:
+                    flattened.append({
+                        "dataElement": de["name"],
+                        "dataElement_id": de["id"],
+                        "category": category["name"],
+                        "category_id": category["id"],
+                        "option": option_["name"],
+                        "option_id": option_["id"]
+                    })
+        print("+++++ flattened +++++")
+        print(flattened)
+
+
+        # After flattening is done
+        unique_categories = sorted({item["category"] for item in flattened})
+        print("✅ Unique categories found:")
+        for cat in unique_categories:
+            print(f"- {cat}")
+
+        # Filter flattened items whose category name matches any disaggregation
+        if disaggregations is not None:
+            filtered_flattened= []
+            for item in flattened:
+                category_name = item["category"].lower().strip()
+                for disaggregation in disaggregations:
+                    matches = find_near_matches(disaggregation.lower().strip(), category_name, max_l_dist=2)
+                    if matches:
+                        filtered_flattened.append(item)
+                        break  # Stop after the first match for this item
+            # Build dictionary of {category_id: [option_id, ...]}
+            disaggregations_dict = {}
+            for item in filtered_flattened:
+                cat_id = item["category_id"]
+                opt_id = item["option_id"]
+                disaggregations_dict.setdefault(cat_id, []).append(opt_id)
+
+
+            # Construct dimensions list
+            dimensions = [
+                f"dx:{indicator_string}",
+                f"pe:{period_string}",
+                f"ou:{org_unit_string}"
+            ]
+
+            # Add disaggregation dimensions
+            for cat_id, option_ids in disaggregations_dict.items():
+                option_string = ";".join(sorted(set(option_ids)))  # Optional: deduplicate + sort
+                dimensions.append(f"{cat_id}:{option_string}")
+
+            dimensions.append("co")  # ⚠️ Only add this if dx supports category option combos
+
+
+        include_num_den = False
+        include_coc_dimension = True  # Often useful for DEs
+
+        # Add co dimension explicitly if requested
+        # if include_coc_dimension:
+        #     dimensions.append("co")  # ⚠️ Only add this if dx supports category option combos
+
+
+    elif doc_type == "programIndicator":
+        include_num_den = False
+        include_coc_dimension = True  # Often useful for DEs
+        pass
+    else:
+        include_num_den = False
+        include_coc_dimension = True  # Often useful for DEs
+        pass
+    params = {
+        "dimension": dimensions,
+        # "displayProperty": display_property,
+        "includeNumDen": str(include_num_den).lower(),
+        "skipMeta": "false",
+        "skipData": "false"
+    }
+    url = f"{DHIS2_BASE_URL.rstrip('/')}/api/analytics"
+    try:
+        response = requests.get(
+            url=url,
+            auth=(DHIS2_USERNAME, DHIS2_PASSWORD),
+            params=params
+        )
+        response.raise_for_status()
+        return {
+            "meta_data": response.json(),
+            "org_units_lookup": org_units_lookup,
+            "flattened": flattened,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def analytics_to_dataframe(tool_data: dict):
     if "data" not in tool_data:
         return pd.DataFrame()
-    data = tool_data["data"]
+    url= tool_data["url"]
+    doc_type = tool_data["doc_type"]
+    disaggregations = tool_data["disaggregations"]
+    indicators = tool_data["indicators"]
+    periods = tool_data["periods"]
+    org_units = tool_data["org_units"]
+    url = url.replace("skipMeta=true", "skipMeta=false")
+    meta_data = get_data(url, doc_type, disaggregations, indicators, periods, org_units)
+    if isinstance(meta_data, str):
+        meta_data = json.loads(meta_data)
+
+    # Now access it safely
+    data = meta_data.get("meta_data", {})
+    org_units_lookup = meta_data.get("org_units_lookup", {}),
+    flattened = meta_data.get("flattened", {}),
+
+
     headers = data.get("headers", [])
     rows = data.get("rows", [])
     columns = [header["name"] for header in headers]
-    return pd.DataFrame(rows, columns=columns)
-
-
-import base64
+    return org_units_lookup, flattened, pd.DataFrame(rows, columns=columns)
 
 
 def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type: str):
@@ -43,24 +213,30 @@ def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type
         "Organisation unit": "ou",
         "Value": "value"
     })
-    # Handle optional category option combo column
-    if "co" in df.columns:
-        df = df.rename(columns={"co": "Category option combo"})
+    # # Handle optional category option combo column
+    # if "co" in df.columns:
+    #     df = df.rename(columns={"co": "Category option combo"})
 
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
     grouped = df[df["dx"].isin(selected_indicators)]
-    labels = sorted(grouped["pe"].unique().tolist())
+    # Define available label columns
+    available_label_columns = ["pe", "ou"] + [col for col in df.columns if col.startswith("co_")]
+
+    # Ensure "pe" is the default (index=0)
+    label_column = st.selectbox("Choose x-axis (label) dimension:", options=available_label_columns,
+                                index=available_label_columns.index("pe"))
+
+    labels = sorted(grouped[label_column].dropna().unique().tolist())
     colors = ["#4285F4", "#DB4437", "#F4B400", "#0F9D58", "#AB47BC"]
     datasets = []
 
     for idx, indicator in enumerate(selected_indicators):
         subset = grouped[grouped["dx"] == indicator]
-        subset_grouped = subset.groupby("pe")["value"].sum().reindex(labels).fillna(0)
+        subset_grouped = subset.groupby(label_column)["value"].sum().reindex(labels).fillna(0)
         values = subset_grouped.tolist()
-
+        dynamic_colors = generate_distinct_colors(len(values))
         if chart_type == "pie":
-            dynamic_colors = generate_distinct_colors(len(values))
             datasets.append({
                 "label": indicator,
                 "data": values,
@@ -72,8 +248,8 @@ def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type
             datasets.append({
                 "label": indicator,
                 "data": values,
-                "backgroundColor": colors[idx % len(colors)],
-                "borderColor": colors[idx % len(colors)],
+                "backgroundColor": dynamic_colors,
+                "borderColor": dynamic_colors,
                 "fill": chart_type != "line",
                 "tension": 0.3
             })
@@ -219,20 +395,22 @@ def render_chart_plotly(df: pd.DataFrame, selected_indicators: list, chart_type:
 
 def chart_data(result_, chart_backend):
     raw_data = result_.get("raw_data", {})
+    print('+++++ raw_data ++++++')
+    print(raw_data)
+
     if raw_data is None:
         st.warning("No visualization data returned from the analytics executor.")
         return
+    org_units_lookup, flattened, df_chart_data = analytics_to_dataframe(raw_data)
 
-    df_chart_data = analytics_to_dataframe(raw_data)
     st.session_state.raw_data_df = df_chart_data
+
     raw_data_df = df_chart_data
 
     # Base required columns
     base_required_cols = {"dx", "pe", "value"}
-
     # Columns to exclude (known standard fields)
-    excluded_cols = {"dx", "pe", "ou", "value", "numerator", "denominator", "factor", "multiplier", "divisor"}
-
+    excluded_cols = {"dx", "pe", "ou", "value", "numerator", "denominator", "factor", "multiplier", "divisor", "co"}
     # Detect up to 3 disaggregation columns (e.g., category option combos)
     disagg_cols = [col for col in raw_data_df.columns if col not in excluded_cols][:3]
 
@@ -241,24 +419,76 @@ def chart_data(result_, chart_backend):
 
     if not raw_data_df.empty and required_cols.issubset(raw_data_df.columns):
         with st.container():
+            # If org_units_lookup or flattened are strings, convert them to Python objects
+            if isinstance(org_units_lookup, str):
+                org_units_lookup = json.loads(org_units_lookup)
+
+            if isinstance(flattened, str):
+                flattened = json.loads(flattened)
+
+            # If they are a tuple (e.g., result of a return statement like `return x,`), unwrap them
+            if isinstance(org_units_lookup, tuple):
+                org_units_lookup = org_units_lookup[0]
+
+            if isinstance(flattened, tuple):
+                flattened = flattened[0]
+
+            org_map = {item['org_id']: item['org'] for item in org_units_lookup}
+            dx_map = {item['dataElement_id']: item['dataElement'] for item in flattened}
+            option_map = {item['option_id']: item['option'] for item in flattened}
+            category_map = {item['category_id']: item['category'] for item in flattened}
+
+            # --- Step 2: Replace IDs with names in DataFrame (only if columns exist) ---
+            def replace_if_exists(df: pd.DataFrame, column: str, mapping: dict):
+                if column in df.columns:
+                    df[column] = df[column].map(mapping).fillna(df[column])
+
+            # Assume filtered_df is already defined
+            # Replace `ou` using org_map
+            replace_if_exists(raw_data_df, 'ou', org_map)
+
+            # Replace `dx` using dx_map
+            replace_if_exists(raw_data_df, 'dx', dx_map)
+
+            # Replace `co` using option_map
+            replace_if_exists(raw_data_df, 'co', option_map)
+
+
+            # Replace `co_1`, `co_2`, ..., using category_map
+            print("++++ disagg_cols +++++")
+            if len(disagg_cols)>0:
+                for col in disagg_cols:
+                    replace_if_exists(raw_data_df, col, option_map)
+
+            print(raw_data_df)
+
+
+
             indicators = raw_data_df["dx"].dropna().unique().tolist()
             periods = sorted(raw_data_df["pe"].dropna().unique().tolist())
-            org_units = (
-                raw_data_df["ou"].dropna().unique().tolist()
-                if "ou" in raw_data_df.columns
-                else raw_data_df["Organisation unit"].dropna().unique().tolist()
-            )
+            try:
+                org_units = (
+                    raw_data_df["ou"].dropna().unique().tolist()
+                    if "ou" in raw_data_df.columns else raw_data_df["Organisation unit"].dropna().unique().tolist()
+
+                )
+            except KeyError:
+                org_units = []
 
             # Rename disaggregation columns to co_1, co_2, etc.
             co_col_map = {}  # e.g. {'co_1': 'cX5k9anHEHd'}
             for idx, col in enumerate(disagg_cols):
-                co_name = f"co_{idx + 1}"
+                readable_name = category_map.get(col, col)  # Fallback to col if not found
+                co_name = f"co_{idx + 1} {readable_name}"
                 raw_data_df.rename(columns={col: co_name}, inplace=True)
                 co_col_map[co_name] = col
 
             # Filters
+
+
             selected_indicators = st.multiselect("Select indicator(s)", indicators, default=indicators[:1])
-            selected_org_units = st.multiselect("Select org unit(s)", org_units, default=org_units)
+            if len(org_units) > 0:
+                selected_org_units = st.multiselect("Select org unit(s)", org_units, default=org_units)
             selected_periods = st.multiselect("Select period(s)", periods, default=periods)
 
             # Multiselect filters for each co_*
@@ -271,16 +501,27 @@ def chart_data(result_, chart_backend):
             chart_type = st.selectbox("Select chart type", ["bar", "line", "pie"])
 
         # Apply all filters
-        filtered_df = raw_data_df[
-            raw_data_df["dx"].isin(selected_indicators) &
-            raw_data_df["pe"].isin(selected_periods) &
-            raw_data_df[raw_data_df.columns[2]].isin(selected_org_units)
-        ]
+        if len(org_units) > 0:
+            raw_data_df.to_csv("filtered_df_6.csv")
+            filtered_df = raw_data_df[
+                raw_data_df["dx"].isin(selected_indicators) &
+                raw_data_df["pe"].isin(selected_periods)
+            ]
+            # & raw_data_df[raw_data_df.columns[2]].isin(selected_org_units)
 
+        else:
+            raw_data_df.to_csv("filtered_df_7.csv")
+            filtered_df = raw_data_df[
+                raw_data_df["dx"].isin(selected_indicators) &
+                raw_data_df["pe"].isin(selected_periods)
+            ]
+        filtered_df.to_csv("filtered_df_8.csv")
         # Apply co_* filters
         for co_col, selected_vals in selected_cos.items():
             if selected_vals:
                 filtered_df = filtered_df[filtered_df[co_col].isin(selected_vals)]
+
+        filtered_df.to_csv("filtered_df_9.csv")
 
         if selected_indicators and not filtered_df.empty:
             if chart_backend == "chartjs":
@@ -293,11 +534,6 @@ def chart_data(result_, chart_backend):
             st.info("No data for the selected filters.")
     else:
         st.warning("No valid data or required columns missing.")
-
-
-
-
-
 
 # ========== App UI ==========
 

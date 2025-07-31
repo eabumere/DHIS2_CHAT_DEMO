@@ -7,3 +7,5 @@ https://www.youtube.com/watch?v=3f-j-PZ5N8A
 ChatCSV Streamlit App: Chat with CSV files using PandasAI and OpenAI
 https://www.youtube.com/watch?v=_7d-QWJH9Ko
 https://github.com/AIAnytime/ChatCSV-Streamlit-App/blob/main/app.py
+
+https://mermaid.live

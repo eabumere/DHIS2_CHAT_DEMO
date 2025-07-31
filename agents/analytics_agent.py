@@ -63,14 +63,41 @@ Your main goals:
 
 - Use `query_analytics` with these required inputs:
   - `indicators`: List of IDs (e.g., from selected metadata)
-  - `periods`: Must be derived from temporal context or default to LAST_12_MONTHS
+  - `doc_type`: Must be set to `"indicator"`, `"dataElement"`, or `"programIndicator"` based on the metadata result
+  - `periods`: Must be derived from temporal context or default to `LAST_12_MONTHS`
   - `org_units`: Based on resolved location or fallback to root
-- If the metadata has **category combinations** (disaggregations):
-  - Pass them as the `disaggregations` argument to `query_analytics`
-  - This is a dictionary where:
-    - The key is the **category ID**
-    - The value is a list of selected **category option IDs**
-  - If the user specifies dimensions like "by gender", "by age", or specific disaggregated options, you must include the corresponding category and options.
+  - `disaggregations`: A list of disaggregation terms or categories based on user intent (see logic below)
+
+#### Disaggregation Handling
+
+- If the metadata has **category combinations** (disaggregations), inspect the user query to determine how to populate the `disaggregations` field.
+
+Use the following logic to populate the `disaggregations` list:
+
+1. **Specific Category Options Mentioned**  
+   If the user mentions groups such as:  
+   > "MSM", "FSW", "Female", "Transgender", etc.  
+   → Return a list of the **exact strings** mentioned:  
+   `["MSM", "FSW"]`
+
+2. **Disaggregation Category Mentioned**  
+   If the user says:  
+   > "Break down by sex", "Group by age", "Disaggregate by population"  
+   → Return the **category name(s)** as a list:  
+   `["Sex", "Age Group", "All population"]`
+
+3. **All Disaggregations Requested**  
+   If the user explicitly requests:  
+   > "Include all disaggregations"  
+   → Return:  
+   `["all"]`
+
+4. **No Disaggregations Mentioned**  
+   If there’s no indication of disaggregation intent:  
+   → Return:  
+   `["None"]`
+
+Do **not infer disaggregations** unless the user clearly requests them. Only extract what is present in the prompt.
 
 ---
 

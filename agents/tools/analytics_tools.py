@@ -20,8 +20,8 @@ DHIS2_BASE_URL = os.getenv("DHIS2_BASE_URL")
 DHIS2_USERNAME = os.getenv("DHIS2_USERNAME")
 DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD")
 # Define confidence threshold and convert to float
-FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", 0.12))
-# FAISS_THRESHOLD = 0.25  # TEMPORARY for testing
+# FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", 0.12))
+FAISS_THRESHOLD = 0.5  # TEMPORARY for testing
 
 # @tool
 # def query_analytics(
@@ -80,13 +80,14 @@ FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", 0.12))
 @tool
 def query_analytics(
     indicators: list[str],
+    doc_type: str,  # 'indicator' or 'dataElement'
     periods: list[str],
     org_units: list[str],
-    disaggregations: Optional[Dict[str, List[str]]] = None,
+    disaggregations: list[str] = None,
     include_coc_dimension: bool = False,
-    skip_meta: bool = False,
+    skip_meta: bool = True,
     display_property: str = "NAME",
-    include_num_den: bool = True,
+    include_num_den: bool = False,
     skip_data: bool = False,
     output_id_scheme: str = "NAME"
 ) -> Dict[str, Any]:
@@ -101,37 +102,47 @@ def query_analytics(
         f"pe:{period_string}",
         f"ou:{org_unit_string}"
     ]
+    # You can now tailor logic using doc_type if needed
+    print(doc_type)
+    # if doc_type == "indicator":
+    #     include_num_den = True
+    #     include_coc_dimension = False
+    # elif doc_type == "dataElement":
+    #     include_num_den = False
+    #     include_coc_dimension = True  # Often useful for DEs
+    # else:
+    #     print(f"Invalid doc_type: {doc_type}. Must be 'indicator' or 'dataElement'.")
 
-    # Add category-based disaggregations if provided
-    if disaggregations:
-        for cat_id, option_ids in disaggregations.items():
-            if option_ids:
-                option_string = ";".join(option_ids)
-                dimensions.append(f"{cat_id}:{option_string}")
 
-    # Add co dimension explicitly if requested
-    if include_coc_dimension:
-        dimensions.append("co")  # ⚠️ Only add this if dx supports category option combos
 
     params = {
         "dimension": dimensions,
-        "displayProperty": display_property,
+        # "displayProperty": display_property,
         "includeNumDen": str(include_num_den).lower(),
         "skipMeta": str(skip_meta).lower(),
         "skipData": str(skip_data).lower(),
         "outputIdScheme": output_id_scheme
     }
 
+    url = f"{DHIS2_BASE_URL.rstrip('/')}/api/analytics"
+
+
     try:
         response = requests.get(
-            f"{DHIS2_BASE_URL}/api/analytics",
+            url,
             params=params,
             auth=(DHIS2_USERNAME, DHIS2_PASSWORD)
         )
         response.raise_for_status()
         return {
             "url": response.url,
-            "data": response.json()
+            "data": response.json(),
+            "doc_type": doc_type,
+            "disaggregations": disaggregations,
+            "indicators": indicators,
+            "periods": periods,
+            "org_units": org_units
+
         }
     except Exception as e:
         return {"error": str(e)}
@@ -182,7 +193,7 @@ def search_metadata(query: str) -> Dict[str, Any]:
 def get_all(
     endpoint: str,
     key: str,
-    fields: str = "*",
+    fields: str = "id,name",
     filters: Optional[Dict[str, str]] = None,
     page_size: int = 600
 ) -> List[Dict[str, Any]]:
@@ -199,6 +210,8 @@ def get_all(
         if filters:
             for field, condition in filters.items():
                 params.setdefault("filter", []).append(f"{field}:{condition}")
+        print("++++++ params ++++++")
+        print(params)
 
         url = f"{DHIS2_BASE_URL}/api/{endpoint}"
         response = requests.get(url, auth=(DHIS2_USERNAME, DHIS2_PASSWORD), params=params)

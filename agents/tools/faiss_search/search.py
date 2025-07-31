@@ -56,7 +56,8 @@ def hybrid_search(query: str):
             filtered_matches.append({
                 "name": r.metadata.get("name", ""),
                 "id": r.metadata.get("id", ""),
-                "doc_type": r.metadata.get("type", "Unknown")
+                "doc_type": r.metadata.get("type", "Unknown"),
+                "categories": r.metadata.get("categories", {})
             })
         return filtered_matches
         # return exact_matches[:top_k]
@@ -84,11 +85,13 @@ def fiass_query(query):
             doc_type = doc.metadata.get("type", "unknown")
             doc_id = doc.metadata.get("id", "N/A")
             name = doc.metadata.get("name", "")
+            categories = doc.metadata.get("categories", {})
             print(f"{count}. {doc.page_content} - {doc_type} - {doc_id} (score: {score:.4f})\n")
             filtered_matches.append({
                 "name": name,
                 "id": doc_id,
                 "doc_type": doc_type,
+                "categories": categories,
                 "score": float(score)
             })
     return filtered_matches

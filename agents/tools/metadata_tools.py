@@ -10,7 +10,8 @@ from re_order import reorder_dhis2_metadata_fixed
 from .schema import get_required_fields_for_schema
 import random
 import string
-
+from langchain_core.tools import tool
+from langchain_core.messages import ToolMessage
 # Load .env credentials
 load_dotenv()
 base_url = os.getenv("DHIS2_BASE_URL")
@@ -351,9 +352,6 @@ def create_metadata(input_str: str) -> str:
             "reason": f"Invalid input or schema validation failed: {str(e)}"
         }, indent=2)
 
-
-from langchain_core.tools import tool
-from langchain_core.messages import ToolMessage
 
 @tool
 def delete_metadata(endpoint: str, names: List[str]) -> ToolMessage:

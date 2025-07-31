@@ -85,7 +85,7 @@ def build_documents(
 
     print(f"Count of Data Elements  => {len(data_elements_)}")
     for de in data_elements_:
-        content = f"{de.get('description', '')}"
+        content = f"{de.get('description', '')} - {de["name"]}"
         docs_.append(Document(
             page_content=content,
             metadata={
