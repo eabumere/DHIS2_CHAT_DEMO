@@ -6,8 +6,10 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.memory import ChatMessageHistory
 from dotenv import load_dotenv
-from typing import List, TypedDict
+from typing import List, TypedDict, Optional, Union
 import os
+import pandas as pd
+from PIL import Image
 from utils.llm import get_llm
 # --- LLM for Routing ---
 llm = get_llm()
@@ -23,9 +25,8 @@ from agents.data_entry_agent import data_entry_executor
 
 
 # --- State ---
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     messages: List[BaseMessage]
-
 
 # --- Routing Prompt ---
 system_prompt = """
@@ -118,7 +119,7 @@ def routing_decision(state: AgentState) -> str:
                 "data element", "dataset", "program", "org unit", "indicator",
                 "create metadata", "update metadata", "delete metadata"
             ],
-            "data_entry_agent": [
+            "data_entry_agent": ["aggregate", "aggregate data entry", "data entry"
                 "form", "submit", "enter value", "fill form",
                 "create data", "update data", "delete data"
             ],
@@ -175,7 +176,8 @@ def event_data_node(state: AgentState) -> AgentState:
     return state
 
 def data_entry_node(state: AgentState) -> AgentState:
-    result = data_entry_executor.invoke({"messages": state["messages"]})
+    result = data_entry_executor.invoke({
+        "messages": state["messages"]})
     output = result.get("output")
     state["messages"].append(output if isinstance(output, AIMessage) else AIMessage(content=str(output)))
     return state

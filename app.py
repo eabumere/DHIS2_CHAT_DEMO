@@ -10,6 +10,11 @@ import base64
 from fuzzysearch import find_near_matches
 import requests
 from dotenv import load_dotenv
+from PIL import Image
+import pdfplumber
+import docx2txt
+from pptx import Presentation
+from io import BytesIO
 from multi_agent import (
     metadata_agent_executor,
     analytics_executor,
@@ -50,18 +55,14 @@ def get_data(url, doc_type, disaggregations, indicators, periods, org_units):
             # fields="id,code,name,parent,children,level,path,ancestors",
             filters={"id": f"in:[{','.join(org_units)}]"}
         )
-        print("+++++ get_the_org ++++")
-        print(get_the_org)
+
 
         for org in get_the_org:
             org_units_lookup.append({
                 "org": org["name"],
                 "org_id": org["id"],
             })
-    print("+++ org_units +++")
-    print(org_units)
-    print("+++ org_units_lookup +++")
-    print(org_units_lookup)
+
 
 
     dimensions = [
@@ -94,9 +95,6 @@ def get_data(url, doc_type, disaggregations, indicators, periods, org_units):
                         "option": option_["name"],
                         "option_id": option_["id"]
                     })
-        print("+++++ flattened +++++")
-        print(flattened)
-
 
         # After flattening is done
         unique_categories = sorted({item["category"] for item in flattened})
@@ -395,8 +393,6 @@ def render_chart_plotly(df: pd.DataFrame, selected_indicators: list, chart_type:
 
 def chart_data(result_, chart_backend):
     raw_data = result_.get("raw_data", {})
-    print('+++++ raw_data ++++++')
-    print(raw_data)
 
     if raw_data is None:
         st.warning("No visualization data returned from the analytics executor.")
@@ -455,13 +451,9 @@ def chart_data(result_, chart_backend):
 
 
             # Replace `co_1`, `co_2`, ..., using category_map
-            print("++++ disagg_cols +++++")
             if len(disagg_cols)>0:
                 for col in disagg_cols:
                     replace_if_exists(raw_data_df, col, option_map)
-
-            print(raw_data_df)
-
 
 
             indicators = raw_data_df["dx"].dropna().unique().tolist()
@@ -502,7 +494,7 @@ def chart_data(result_, chart_backend):
 
         # Apply all filters
         if len(org_units) > 0:
-            raw_data_df.to_csv("filtered_df_6.csv")
+            # raw_data_df.to_csv("filtered_df_6.csv")
             filtered_df = raw_data_df[
                 raw_data_df["dx"].isin(selected_indicators) &
                 raw_data_df["pe"].isin(selected_periods)
@@ -510,18 +502,18 @@ def chart_data(result_, chart_backend):
             # & raw_data_df[raw_data_df.columns[2]].isin(selected_org_units)
 
         else:
-            raw_data_df.to_csv("filtered_df_7.csv")
+            # raw_data_df.to_csv("filtered_df_7.csv")
             filtered_df = raw_data_df[
                 raw_data_df["dx"].isin(selected_indicators) &
                 raw_data_df["pe"].isin(selected_periods)
             ]
-        filtered_df.to_csv("filtered_df_8.csv")
+        # filtered_df.to_csv("filtered_df_8.csv")
         # Apply co_* filters
         for co_col, selected_vals in selected_cos.items():
             if selected_vals:
                 filtered_df = filtered_df[filtered_df[co_col].isin(selected_vals)]
 
-        filtered_df.to_csv("filtered_df_9.csv")
+        # filtered_df.to_csv("filtered_df_9.csv")
 
         if selected_indicators and not filtered_df.empty:
             if chart_backend == "chartjs":
@@ -571,15 +563,74 @@ with col1:
 with col2:
     st.title("🗨️ DHIS2 Chat Assistant")
 
-upload_file = st.file_uploader("Upload a file", type=["csv", "xlsx", "xls"])
+upload_file = st.file_uploader(
+    "Upload any file",
+    type=["csv", "xlsx", "xls", "pdf", "png", "jpg", "jpeg", "docx", "doc", "ppt", "pptx"]
+)
+
+
+
 if upload_file is not None:
-    if upload_file.name.endswith(".csv"):
-        df = pd.read_csv(upload_file)
-    else:
-        df = pd.read_excel(upload_file)
-    st.session_state.raw_data_df = df
-    st.write("✅ File uploaded:", upload_file.name)
-    st.write(df)
+    file_name = upload_file.name.lower()
+    st.write(f"📁 File uploaded: `{file_name}`")
+
+    try:
+        if file_name.endswith(".csv"):
+            df = pd.read_csv(upload_file)
+            st.session_state.raw_data_df_uploaded = df
+            st.success("✅ CSV loaded")
+            st.dataframe(df)
+
+        elif file_name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(upload_file)
+            st.session_state.raw_data_df_uploaded = df
+            st.success("✅ Excel loaded")
+            st.dataframe(df)
+
+        elif file_name.endswith(".pdf"):
+            with pdfplumber.open(BytesIO(upload_file.read())) as pdf:
+                full_text = "\n".join([page.extract_text() or "" for page in pdf.pages])
+            st.session_state.pdf_text = full_text
+            st.success("✅ PDF parsed")
+            st.text_area("📄 PDF Text", full_text, height=300)
+
+        elif file_name.endswith((".png", ".jpg", ".jpeg")):
+            image = Image.open(upload_file)
+            st.session_state.uploaded_image = image
+            st.success("✅ Image loaded")
+            st.image(image, caption="Uploaded Image", use_column_width=True)
+
+        elif file_name.endswith(".docx"):
+            text = docx2txt.process(upload_file)
+            st.session_state.word_text = text
+            st.success("✅ DOCX parsed")
+            st.text_area("📄 Word Text", text, height=300)
+
+        elif file_name.endswith(".doc"):
+            st.warning("Legacy `.doc` support is limited. Please convert to `.docx` for better results.")
+            st.session_state.word_text = ""
+
+        elif file_name.endswith(".pptx"):
+            prs = Presentation(upload_file)
+            slides_text = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        slides_text.append(shape.text)
+            full_text = "\n".join(slides_text)
+            st.session_state.ppt_text = full_text
+            st.success("✅ PowerPoint parsed")
+            st.text_area("📄 Slides Text", full_text, height=300)
+
+        elif file_name.endswith(".ppt"):
+            st.warning("Legacy `.ppt` support is limited. Please convert to `.pptx` for better results.")
+            st.session_state.ppt_text = ""
+
+        else:
+            st.warning("Unsupported file type.")
+
+    except Exception as e:
+        st.error(f"❌ Error reading file: {e}")
 
 # ========== Side bar =============
 
@@ -617,8 +668,36 @@ if prompt := st.chat_input("Ask DHIS2 Assistant..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    state = {"messages": st.session_state.messages}
+    state = {
+        "messages": st.session_state.messages
+    }
+    raw_df = st.session_state.get("raw_data_df_uploaded", None)
+    columns = raw_df.columns.tolist() if raw_df is not None else []
+    # Inject column info message FIRST so it's in context before invoking
+    messages = st.session_state.get("messages", []).copy()
+    if columns:
+        column_msg = AIMessage(
+
+            content=f"The uploaded data contains the following columns: {columns}"
+
+        )
+
+        messages.append(column_msg)
+
+
+        state = {
+
+            "messages": messages,
+            "dataframe": raw_df,  # Optional: pass the actual dataframe too
+            "dataframe_columns": columns  # Required: LLM needs column names
+            # "pdf_text": st.session_state.get("pdf_text", None),
+            # "image": st.session_state.get("uploaded_image", None),
+            # "word_text": st.session_state.get("word_text", None),
+            # "ppt_text": st.session_state.get("ppt_text", None)
+
+        }
     route = routing_decision(state)
+
 
     if route == "metadata":
         result = metadata_agent_executor.invoke(state)
@@ -637,8 +716,10 @@ if prompt := st.chat_input("Ask DHIS2 Assistant..."):
             st.session_state.result = result
             st.session_state.show_chart = True
 
-
     elif route == "data_entry":
+
+
+
         result = data_entry_executor.invoke(state)
     elif route == "event_data":
         result = event_data_executor.invoke(state)
