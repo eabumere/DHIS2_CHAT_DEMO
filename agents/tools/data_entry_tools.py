@@ -29,6 +29,39 @@ class DataValue(BaseModel):
     value: str
 
 
+def apply_structured_instruction(df: pd.DataFrame, instruction: Dict, params: str) -> pd.DataFrame:
+    match_criteria = instruction.get("match_criteria", {})
+    update_values = instruction.get("update_values", {})
+
+    # If no match criteria, do nothing
+    if not match_criteria:
+        return df
+
+    # Create a mask to filter matching rows
+    mask = pd.Series([True] * len(df))
+    for col, val in match_criteria.items():
+        if col not in df.columns:
+            raise ValueError(f"Match column '{col}' not found in DataFrame")
+        mask &= df[col] == val
+
+    # Handle DELETE operation: return only rows to be deleted
+    if params == "DELETE":
+        return df[mask].copy()
+
+    # Handle CREATE_AND_UPDATE: apply updates and return full DataFrame
+    if params == "CREATE_AND_UPDATE":
+        if not update_values:
+            return df  # Nothing to update
+        for update_col, update_val in update_values.items():
+            if update_col not in df.columns:
+                raise ValueError(f"Update column '{update_col}' not found in DataFrame")
+            df.loc[mask, update_col] = update_val
+        return df
+
+    # Fallback: return unchanged if unknown params
+    return df
+
+
 class SubmitPayload(BaseModel):
     preview_only: Optional[bool] = Field(
         False, description="If true, only previews the payload without submitting."
@@ -40,42 +73,28 @@ class SubmitPayload(BaseModel):
     params: str = Field(
         ..., description="DHIS2 operation type: 'CREATE_AND_UPDATE' or 'DELETE'."
     )
-
-def manipulate_data(df: pd.DataFrame, operation: str, match_criteria: dict, update_values: dict = None) -> pd.DataFrame:
-    if operation == "UPDATE":
-        mask = pd.Series(True, index=df.index)
-        for key, value in match_criteria.items():
-            mask &= df[key] == value
-        df.loc[mask, list(update_values.keys())] = pd.Series(update_values)
-        return df
-
-    elif operation == "DELETE":
-        mask = pd.Series(True, index=df.index)
-        for key, value in match_criteria.items():
-            mask &= df[key] == value
-        return df[~mask]
-
-    elif operation == "CREATE":
-        new_row = {**match_criteria, **(update_values or {})}
-        return pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-
-    else:
-        raise ValueError(f"Unsupported operation: {operation}")
+    structured_instruction: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Instructions to match and update data rows. Example: {match_criteria: {...}, update_values: {...}}"
+    )
 
 
 @tool(args_schema=SubmitPayload)
 def submit_aggregate_data(
     preview_only: bool = False,
-    column_mapping: Dict[str, str] = None,
-    params: str = None,
+    column_mapping: Optional[Dict[str, str]] = None,
+    params: Optional[str] = None,
+    structured_instruction: Optional[Dict[str, Any]] = None
 ) -> dict:
     """
     Submits or deletes DHIS2 aggregate data values.
 
     - Builds the payload from the uploaded dataframe in session using column_mapping.
+    - If structured_instruction is provided, applies filtering/updating before submission.
     - `params` defines the operation: 'CREATE_AND_UPDATE' or 'DELETE'.
     - If preview_only is True, returns the payload without submitting.
     """
+
     df = st.session_state.get("raw_data_df_uploaded")
     if df is None or not isinstance(df, pd.DataFrame):
         return {"error": "No uploaded dataframe found in session."}
@@ -86,30 +105,52 @@ def submit_aggregate_data(
         if not column_mapping:
             return {"error": "No column_mapping provided and no mapping found in session_state.suggested_columns_data_entry."}
 
-    # Normalize and rename
+    # Normalize columns and rename per mapping
     df.columns = [col.strip().lower() for col in df.columns]
     renaming_map = {k.strip().lower(): v for k, v in column_mapping.items()}
     df.rename(columns=renaming_map, inplace=True)
+    print("++++ Structured Instruction ++++")
+    print(structured_instruction)
+
+    # Apply structured instruction if provided
+    if structured_instruction:
+        print("++++ Structured Instruction ++++")
+        df = apply_structured_instruction(df, structured_instruction, params)
+        print(df)
+
+        # For DELETE operation with structured_instruction,
+        # we only send the matched rows to delete
+        if structured_instruction.get("operation", "").upper() == "DELETE":
+            # For delete, params should be DELETE explicitly
+            params = "DELETE"
 
     required_cols = ["dataElement", "period", "orgUnit", "categoryOptionCombo", "attributeOptionCombo", "value"]
+
+    print('+++ DF ++++')
+    print(df)
+
     if not all(col in df.columns for col in required_cols):
         return {
-            "error": "Missing one or more required columns after applying mapping.",
+            "error": "Missing one or more required columns after applying mapping and instructions.",
             "columns_found": list(df.columns),
             "required_columns": required_cols,
             "column_mapping_used": renaming_map,
         }
 
+    # Prepare data payload
     payload = {"dataValues": df[required_cols].to_dict(orient="records")}
+
+    print("+++ payload +++")
+    print(payload)
 
     if preview_only:
         return {"preview_payload": payload, "operation": params}
 
+    # Send request to DHIS2 API
     try:
-        if params.upper() == "DELETE":
+        import_strategy = {"importStrategy": "CREATE_AND_UPDATE"}
+        if params and params.upper() == "DELETE":
             import_strategy = {"importStrategy": "DELETE"}
-        else:
-            import_strategy = {"importStrategy": "CREATE_AND_UPDATE"}
 
         url = f"{DHIS2_BASE_URL}/api/dataValueSets"
         response = requests.post(url, json=payload, auth=auth, params=import_strategy)
@@ -125,7 +166,6 @@ def submit_aggregate_data(
             "details": str(e),
             "response_text": response.text if 'response' in locals() else None,
         }
-
 
 class ColumnMappingInput(BaseModel):
     columns: List[str]

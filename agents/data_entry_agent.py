@@ -1,12 +1,14 @@
 # agents/data_entry_agent.py
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import BaseMessage, AIMessage
+from langchain_core.messages import BaseMessage, AIMessage, ToolMessage
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_core.agents import AgentFinish, AgentAction
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from .tools.data_entry_tools import submit_aggregate_data, suggest_column_mapping
 from dotenv import load_dotenv
 from typing import List, TypedDict, Optional, Any
+import streamlit as st
 import os
 import pandas as pd
 from utils.llm import get_llm
@@ -33,7 +35,7 @@ system_prompt = """
 You are a data entry assistant for DHIS2, specializing in aggregate data submissions.
 
 Your responsibilities include:
-- Submitting or deleting aggregate data values to/from DHIS2 using the `submit_aggregate_data` tool.
+- Submitting, updating, or deleting aggregate data values to/from DHIS2 using the `submit_aggregate_data` tool.
 - Ensuring all submissions include the required fields:
   - dataElement
   - period
@@ -52,6 +54,19 @@ Data Source and Column Mapping:
   - case differences (e.g., `Dataelement` → `dataElement`)
   - common aliases (e.g., `val` or `count` → `value`, `facility` → `orgUnit`)
 
+Structured Instructions:
+- You may receive instructions that specify operations on subsets of data, for example:
+{{
+  "operation": "UPDATE",
+  "match_criteria": {{"categoryOptionCombo": "abc"}},
+  "update_values": {{"period": 202506}}
+}}
+- Supported operations are: CREATE, UPDATE, DELETE.
+- Use `match_criteria` to filter rows in the dataframe.
+- Use `update_values` to specify new values for those rows (for CREATE or UPDATE).
+- For DELETE, `match_criteria` identifies rows to remove.
+- Pass this structured instruction as the `structured_instruction` argument when calling `submit_aggregate_data`.
+
 ⚠️ TOOL CHAINING AND MEMORY:
 - When you call the `suggest_column_mapping` tool, you MUST remember and reuse its output.
 - The result of `suggest_column_mapping` must be passed explicitly as the `column_mapping` argument when you call `submit_aggregate_data`.
@@ -60,30 +75,32 @@ Data Source and Column Mapping:
 
 Tool Usage:
 - Use `suggest_column_mapping` to infer or confirm column mappings when uncertain.
-- To preview the submission or deletion payload, call `submit_aggregate_data` with:
+- To preview the submission, update, or deletion payload, call `submit_aggregate_data` with:
   - `preview_only=True`
   - a valid `column_mapping`
-  - a `params` value of either `"CREATE_AND_UPDATE"` or `"DELETE"`
+  - optionally a `params` value of `"CREATE_AND_UPDATE"` or `"DELETE"`
+  - optionally a `structured_instruction` dict for filtered or bulk operations
 
 Submission vs Deletion:
-- To **submit** data, proceed only if the user clearly says: "submit", "post", or "send".
+- To **submit** or **update** data, proceed only if the user clearly says: "submit", "post", "send", or "update".
   - Call `submit_aggregate_data` with `preview_only=False` and `params="CREATE_AND_UPDATE"`.
 - To **delete** data, proceed only if the user clearly says: "delete", "remove", or "retract".
   - Call `submit_aggregate_data` with `preview_only=False` and `params="DELETE"`.
-- For both submission and deletion, the same required fields must be present in the mapped data.
+- For all operations, the same required fields must be present in the mapped data.
 
 Clarify Before Acting:
 - If any required field appears missing or is ambiguously mapped, do not proceed silently.
   - Ask the user for clarification or confirmation.
   - Clearly explain any assumptions or uncertainties.
+- If the structured instruction is ambiguous or incomplete, request clarification before proceeding.
 
 Restrictions:
 - Do not access or rely on the full dataframe yourself — only use tools to operate on it.
 - Never use `data_values` directly — the payload must be constructed from the session dataframe using `column_mapping`.
 - Do not build or send a payload unless confident that all required fields are correctly mapped.
-- Never assume user intent. Always confirm before taking submission or deletion actions.
+- Never assume user intent. Always confirm before taking submission, update, or deletion actions.
 
-Your goal is to assist with accurate and complete DHIS2 aggregate data submissions or deletions, using the tools and information available while ensuring full transparency, validation, and user confirmation.
+Your goal is to assist with accurate and complete DHIS2 aggregate data submissions, updates, or deletions, using the tools and information available while ensuring full transparency, validation, and user confirmation.
 """
 
 
@@ -104,6 +121,16 @@ openai_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, return_i
 
 def agent_node(state: AgentState) -> AgentState:
     try:
+        messages = state.get("messages", [])
+        column_mapping = suggest_column_mapping.invoke({"columns": state.get("dataframe_columns", [])})
+        st.session_state.suggested_columns_data_entry = column_mapping
+        if column_mapping:
+            column_msg = AIMessage(
+                    content=f"The suggested mapped columns are: {column_mapping}"
+                )
+
+            messages.append(column_msg)
+        state["messages"] = messages
         result = openai_executor.invoke(state)  # Pass full state with all messages
         return {
             "messages": result["messages"],
@@ -126,6 +153,7 @@ def agent_node(state: AgentState) -> AgentState:
             "messages": messages,
             "output": AIMessage(content=user_friendly_message)
         }
+
 
 graph = StateGraph(AgentState)
 graph.add_node("agent", agent_node)
