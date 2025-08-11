@@ -277,7 +277,7 @@ def validate_payload_against_schema(payload: dict, schema: dict) -> None:
 def apply_defaults(item: dict, schema: dict):
     """Recursively apply defaults and DHIS2-specific fallback defaults."""
     required = schema.get("required", [])
-    print(required)
+    # print(required)
     properties = schema.get("properties", {})
     for field in required:
         if field not in item:
