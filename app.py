@@ -671,8 +671,6 @@ if prompt := st.chat_input("Ask DHIS2 Assistant..."):
         "messages": st.session_state.messages
     }
     raw_df = st.session_state.get("raw_data_df_uploaded", None)
-    print("+++ raw_df +++")
-    print(raw_df)
     columns = raw_df.columns.tolist() if raw_df is not None else []
     # Inject column info message FIRST so it's in context before invoking
     messages = st.session_state.get("messages", []).copy()

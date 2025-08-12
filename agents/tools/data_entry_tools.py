@@ -9,8 +9,13 @@ from pydantic import BaseModel, Field
 import pandas as pd
 import streamlit as st
 from fuzzysearch import find_near_matches
+from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
+import pandas as pd
+from io import StringIO
+import re
+from utils.llm import get_llm
 
-
+llm = get_llm()
 load_dotenv()
 DHIS2_BASE_URL = os.getenv("DHIS2_BASE_URL")
 DHIS2_USERNAME = os.getenv("DHIS2_USERNAME")
@@ -29,9 +34,90 @@ class DataValue(BaseModel):
     value: str
 
 
+def ensure_dataframe(obj):
+    # Already a DataFrame
+    if isinstance(obj, pd.DataFrame):
+        return obj
+
+    # List of dicts
+    if isinstance(obj, list) and all(isinstance(row, dict) for row in obj):
+        return pd.DataFrame(obj)
+
+    # String output
+    if isinstance(obj, str):
+        text = obj.strip()
+
+        # 1️⃣ Try JSON first
+        if text.startswith("{") or text.startswith("["):
+            try:
+                return pd.read_json(StringIO(text))
+            except Exception:
+                pass
+
+        # 2️⃣ Remove leading sentences before any table-like pattern
+        patterns = [
+            r"(\n\s*\|.*\|)",        # Markdown header
+            r"(\n\s*\d+\s*\|.*\|)",  # Numbered row start
+            r"(^dataElement\s*\|)",  # Column header with |
+        ]
+        start_index = None
+        for pat in patterns:
+            m = re.search(pat, text, flags=re.MULTILINE)
+            if m:
+                start_index = m.start()
+                break
+        if start_index is not None:
+            text = text[start_index:]
+
+        # 3️⃣ Read as pipe-delimited table
+        try:
+            df = pd.read_csv(StringIO(text), sep="|", engine="python")
+            df = df.dropna(axis=1, how="all")  # drop empty cols
+
+            # Strip spaces from column names
+            df.columns = [c.strip() for c in df.columns]
+
+            # Drop unnamed index columns safely
+            unnamed_cols = [c for c in df.columns if c.lower().startswith("unnamed")]
+            df = df.drop(columns=unnamed_cols)
+
+            # Drop rows that are actually markdown separator lines
+            df = df[~df.iloc[:, 0].astype(str).str.contains("---", na=False)]
+
+            df = df.reset_index(drop=True)
+            df = df.reset_index(drop=True)
+
+            # 🚿 Clean all whitespace
+            df.columns = [c.strip() for c in df.columns]
+            df = df.apply(lambda col: col.map(lambda x: x.strip() if isinstance(x, str) else x))
+
+            if df.empty:
+                raise ValueError("Parsed DataFrame is empty")
+
+            return df
+
+        except Exception as e:
+            raise ValueError(f"Failed to parse table from string: {e}")
+
+    raise TypeError(f"Unsupported type for DataFrame conversion: {type(obj)}")
+
+
 def apply_structured_instruction(df: pd.DataFrame, instruction: Dict, params: str) -> pd.DataFrame:
     match_criteria = instruction.get("match_criteria", {})
     update_values = instruction.get("update_values", {})
+
+    print("+++ match_criteria +++")
+    print(match_criteria)
+
+    print("+++ update_values +++")
+    print(update_values)
+
+    print("++++ instruction ++++")
+    print(instruction)
+
+    print("++++ params ++++")
+    print(params)
+
 
     # If no match criteria, do nothing
     if not match_criteria:
@@ -73,9 +159,24 @@ class SubmitPayload(BaseModel):
     params: str = Field(
         ..., description="DHIS2 operation type: 'CREATE_AND_UPDATE' or 'DELETE'."
     )
-    structured_instruction: Optional[Dict[str, Any]] = Field(
+    structured_instruction: Dict[str, Any] = Field(
         None,
-        description="Instructions to match and update data rows. Example: {match_criteria: {...}, update_values: {...}}"
+        description=(
+            "Structured JSON instructions to match and update data rows. "
+            "Example: {"
+            "  'operation': 'UPDATE', "
+            "  'match_criteria': {...}, "
+            "  'update_values': {...}, "
+            "  'specific_rows': [0, 2, 5] "
+            "}"
+        )
+    )
+    instruction_prompt: str = Field(
+        ...,
+        description=(
+            "Natural language prompt describing the intended dataframe operation. "
+            "Used by the LLM to interpret user intent and validate or complement the structured_instruction."
+        )
     )
 
 
@@ -84,7 +185,8 @@ def submit_aggregate_data(
     preview_only: bool = False,
     column_mapping: Optional[Dict[str, str]] = None,
     params: Optional[str] = None,
-    structured_instruction: Optional[Dict[str, Any]] = None
+    structured_instruction: Optional[Dict[str, Any]] = None,
+    instruction_prompt: Optional[str] = None,
 ) -> dict:
     """
     Submits or deletes DHIS2 aggregate data values.
@@ -94,7 +196,7 @@ def submit_aggregate_data(
     - `params` defines the operation: 'CREATE_AND_UPDATE' or 'DELETE'.
     - If preview_only is True, returns the payload without submitting.
     """
-
+    required_cols = ["dataElement", "period", "orgUnit", "categoryOptionCombo", "attributeOptionCombo", "value"]
     df = st.session_state.get("raw_data_df_uploaded")
     if df is None or not isinstance(df, pd.DataFrame):
         return {"error": "No uploaded dataframe found in session."}
@@ -109,25 +211,89 @@ def submit_aggregate_data(
     df.columns = [col.strip().lower() for col in df.columns]
     renaming_map = {k.strip().lower(): v for k, v in column_mapping.items()}
     df.rename(columns=renaming_map, inplace=True)
-    print("++++ Structured Instruction ++++")
-    print(structured_instruction)
+    original_df = df.copy()
+    # Determine operation type from params
+    operation = params.upper()  # e.g., "DELETE", "CREATE_AND_UPDATE"
+    to_delete_rows = pd.DataFrame()
+    dataframe_emptied = False
 
-    # Apply structured instruction if provided
-    if structured_instruction:
-        print("++++ Structured Instruction ++++")
+
+    if instruction_prompt:
+        agent = create_pandas_dataframe_agent(llm, df, verbose=False,     allow_dangerous_code=True,  # <--- THIS enables REPL code execution
+        )
+        try:
+            print("++++ instruction_prompt ++++++ ")
+            return_instruction = "return the updated dataframe"
+            print(instruction_prompt)
+            result = agent.invoke({"input": f"{instruction_prompt} {return_instruction}"})
+            # Use invoke() instead of run() — invoke returns a dict with outputs, including python execution results
+            # Check if it's nested
+            if isinstance(result.get("output"), dict) and "python_repl" in result["output"]:
+                processed_df = result["output"]["python_repl"]
+            else:
+                processed_df = result.get("output")
+
+            print("Updated DataFrame:", processed_df)
+            print("Type:", type(processed_df))
+
+            # If it's a string that looks like JSON or table
+            if isinstance(processed_df, str):
+                stripped = processed_df.strip()
+                # Special case: "dataframe is empty" message
+                if "dataframe is now empty" in stripped.lower() or "dataframe is empty" in stripped.lower():
+                    dataframe_emptied = True  # Return empty
+
+
+            # Usage
+            if not dataframe_emptied:
+                df = ensure_dataframe(processed_df)
+                # original_df.columns = original_df.columns.str.strip().str.lower()
+                # print("++++ original_df.columns  ++++")
+                print(original_df.columns)
+
+                # df.columns = pd.Index(df.columns).str.strip().str.lower()
+                if '' in df.columns:
+                    df = df.drop(columns=[''])
+                print(df.columns)
+                df['period'] = df['period'].astype(str).str.strip()
+                original_df['period'] = original_df['period'].astype(str).str.strip()
+                df['value'] = df['value'].astype(str).str.strip()
+                original_df['value'] = original_df['value'].astype(str).str.strip()
+
+                df = df[required_cols]
+                original_df = original_df[required_cols]
+
+                # Extract relevant records
+                if operation == "DELETE":
+                    # For delete, you want only the rows that were removed
+                    # You'd need to compare original df and final df
+                    to_delete_rows = original_df.merge(df, indicator=True, how="outer") \
+                        .query('_merge == "left_only"') \
+                        .drop('_merge', axis=1)
+                    print("target_rows:", to_delete_rows)
+            else:
+                # Extract relevant records
+                if operation == "DELETE":
+                    to_delete_rows = original_df.copy()
+        except Exception as e:
+            if "out-of-bounds" in str(e):
+                # Extract relevant records
+                if operation == "DELETE" and 'all' in instruction_prompt.lower():
+                    to_delete_rows = original_df.copy()
+            else:
+                return {"error": "Failed to apply instruction via LangChain agent.", "details": str(e)}
+    elif structured_instruction:
+        print("++++ Cleaned after Structured Instruction ++++")
         df = apply_structured_instruction(df, structured_instruction, params)
         print(df)
 
         # For DELETE operation with structured_instruction,
         # we only send the matched rows to delete
         if structured_instruction.get("operation", "").upper() == "DELETE":
-            # For delete, params should be DELETE explicitly
+            # For delete, params should be deleted explicitly
             params = "DELETE"
 
-    required_cols = ["dataElement", "period", "orgUnit", "categoryOptionCombo", "attributeOptionCombo", "value"]
 
-    print('+++ DF ++++')
-    print(df)
 
     if not all(col in df.columns for col in required_cols):
         return {
@@ -138,14 +304,18 @@ def submit_aggregate_data(
         }
 
     # Prepare data payload
-    payload = {"dataValues": df[required_cols].to_dict(orient="records")}
+    # Extract relevant records
+    if operation == "DELETE":
+        payload = {"dataValues": to_delete_rows[required_cols].to_dict(orient="records")}
+    else:
+        payload = {"dataValues": df[required_cols].to_dict(orient="records")}
 
     print("+++ payload +++")
     print(payload)
 
     if preview_only:
         return {"preview_payload": payload, "operation": params}
-
+    response = {}
     # Send request to DHIS2 API
     try:
         import_strategy = {"importStrategy": "CREATE_AND_UPDATE"}
@@ -155,6 +325,7 @@ def submit_aggregate_data(
         url = f"{DHIS2_BASE_URL}/api/dataValueSets"
         response = requests.post(url, json=payload, auth=auth, params=import_strategy)
         response.raise_for_status()
+        print({"data": response.json(), "operation": params})
 
         return {"data": response.json(), "operation": params}
 
