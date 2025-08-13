@@ -195,11 +195,20 @@ def submit_aggregate_data(
     - If structured_instruction is provided, applies filtering/updating before submission.
     - `params` defines the operation: 'CREATE_AND_UPDATE' or 'DELETE'.
     - If preview_only is True, returns the payload without submitting.
+
+    Args:
+        preview_only: If True, only return payload without submission.
+        column_mapping: Mapping from uploaded column names to DHIS2 expected columns.
+        params: Operation type: 'CREATE_AND_UPDATE' or 'DELETE'.
+        structured_instruction: Predefined structured instructions for filtering/updating.
+        instruction_prompt: Freeform natural language instruction to be executed via agent.
     """
     required_cols = ["dataElement", "period", "orgUnit", "categoryOptionCombo", "attributeOptionCombo", "value"]
-    df = st.session_state.get("raw_data_df_uploaded")
-    if df is None or not isinstance(df, pd.DataFrame):
-        return {"error": "No uploaded dataframe found in session."}
+    master_df = st.session_state.get("raw_data_df_uploaded")
+    if master_df is None or not isinstance(master_df, pd.DataFrame):
+        return {"error": "No master uploaded dataframe found in session."}
+
+    df = master_df.copy()
 
     # Use fallback if column_mapping not provided
     if not column_mapping:
@@ -212,20 +221,14 @@ def submit_aggregate_data(
     renaming_map = {k.strip().lower(): v for k, v in column_mapping.items()}
     df.rename(columns=renaming_map, inplace=True)
     original_df = df.copy()
-    # Determine operation type from params
     operation = params.upper()  # e.g., "DELETE", "CREATE_AND_UPDATE"
     to_delete_rows = pd.DataFrame()
     dataframe_emptied = False
-
-
     if instruction_prompt:
-        agent = create_pandas_dataframe_agent(llm, df, verbose=False,     allow_dangerous_code=True,  # <--- THIS enables REPL code execution
-        )
         try:
-            print("++++ instruction_prompt ++++++ ")
-            return_instruction = "return the updated dataframe"
+            agent = create_pandas_dataframe_agent(llm, df, verbose=False, allow_dangerous_code=True)
             print(instruction_prompt)
-            result = agent.invoke({"input": f"{instruction_prompt} {return_instruction}"})
+            result = agent.invoke({"input": f"{instruction_prompt} return the updated dataframe"})
             # Use invoke() instead of run() — invoke returns a dict with outputs, including python execution results
             # Check if it's nested
             if isinstance(result.get("output"), dict) and "python_repl" in result["output"]:
@@ -242,39 +245,25 @@ def submit_aggregate_data(
                 # Special case: "dataframe is empty" message
                 if "dataframe is now empty" in stripped.lower() or "dataframe is empty" in stripped.lower():
                     dataframe_emptied = True  # Return empty
-
-
-            # Usage
+                else:
+                    df = ensure_dataframe(processed_df)
             if not dataframe_emptied:
-                df = ensure_dataframe(processed_df)
-                # original_df.columns = original_df.columns.str.strip().str.lower()
-                # print("++++ original_df.columns  ++++")
-                print(original_df.columns)
-
-                # df.columns = pd.Index(df.columns).str.strip().str.lower()
-                if '' in df.columns:
-                    df = df.drop(columns=[''])
-                print(df.columns)
+                if operation == "DELETE":
+                    to_delete_rows = original_df.copy()
+            else:
+                df = df[required_cols]
+                original_df = original_df[required_cols]
                 df['period'] = df['period'].astype(str).str.strip()
                 original_df['period'] = original_df['period'].astype(str).str.strip()
                 df['value'] = df['value'].astype(str).str.strip()
                 original_df['value'] = original_df['value'].astype(str).str.strip()
-
-                df = df[required_cols]
-                original_df = original_df[required_cols]
-
-                # Extract relevant records
                 if operation == "DELETE":
-                    # For delete, you want only the rows that were removed
-                    # You'd need to compare original df and final df
+
                     to_delete_rows = original_df.merge(df, indicator=True, how="outer") \
                         .query('_merge == "left_only"') \
                         .drop('_merge', axis=1)
                     print("target_rows:", to_delete_rows)
-            else:
-                # Extract relevant records
-                if operation == "DELETE":
-                    to_delete_rows = original_df.copy()
+
         except Exception as e:
             if "out-of-bounds" in str(e):
                 # Extract relevant records

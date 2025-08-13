@@ -1,9 +1,7 @@
 # agents/data_entry_agent.py
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, AIMessage, ToolMessage
-from langchain_community.chat_models import AzureChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_core.agents import AgentFinish, AgentAction
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from .tools.data_entry_tools import submit_aggregate_data, suggest_column_mapping
 from dotenv import load_dotenv
@@ -25,75 +23,34 @@ class AgentState(TypedDict):
 
 
 
-llm = get_llm()
-
-tools = [submit_aggregate_data, suggest_column_mapping]
-
 system_prompt = """
-You are a data entry assistant for DHIS2, specializing in aggregate data submissions.
+You are a DHIS2 data entry assistant. Your job is to help users submit, update, and delete data in DHIS2.
 
-Your responsibilities include:
-- Submitting, updating, or deleting aggregate data values to/from DHIS2 using the `submit_aggregate_data` tool.
+AVAILABLE TOOLS:
+1. suggest_column_mapping - Use this to map CSV columns to DHIS2 fields
+2. submit_aggregate_data - Use this to submit, update, or delete data
 
-Data Source and Column Mapping:
-- All data comes from a pre-uploaded dataframe stored in: `st.session_state["raw_data_df_uploaded"]`.
-- This dataframe is not directly accessible to you, but tool functions can read from it.
-- You are provided with the uploaded data's column names via the `dataframe_columns` argument.
-- Your task is to map these user-provided column names to DHIS2’s required fields.
-- Normalize common formatting issues like:
-  - snake_case → camelCase (e.g., `org_unit` → `orgUnit`)
-  - case differences (e.g., `Dataelement` → `dataElement`)
-  - common aliases (e.g., `val` or `count` → `value`, `facility` → `orgUnit`)
+WORKFLOW:
+1. When user uploads data, use suggest_column_mapping to create column mappings
+2. When user wants to submit/import data, call submit_aggregate_data with preview_only=True first
+3. When user confirms, call submit_aggregate_data with preview_only=False
+4. When user wants to delete data, call submit_aggregate_data with params="DELETE"
 
-Structured Instructions and Natural Language Instruction Prompt:
-- The tool expects **both** `structured_instruction` and `instruction_prompt` arguments to be provided together on every call.
-- `structured_instruction` is a strict JSON object describing dataframe operations, including:
-  - `"operation"`: one of `"CREATE"`, `"UPDATE"`, or `"DELETE"`.
-  - `"match_criteria"`: a dictionary of column-value pairs used to filter rows.
-  - `"update_values"`: a dictionary of column-value pairs used to update matched rows.
-  - `"specific_rows"` (optional): a list of explicit row indices (e.g., `[0,2,5]`) or row identifiers to further specify target rows.
-- `instruction_prompt` is a natural language description of the intended operation, allowing the LLM to interpret user intent flexibly.
-- The system first applies `structured_instruction` precisely, then uses `instruction_prompt` for validation, clarification, or handling ambiguous cases.
-- Always ensure both arguments are provided to avoid incomplete or unintended data operations.
+IMPORTANT RULES:
+- ALWAYS use the tools. Never just describe what you will do.
+- For any data operation (submit/update/delete), you MUST call submit_aggregate_data
+- If user says "use it", "submit", "import", "delete", "update" - call the appropriate tool immediately
+- Do not ask for clarification unless absolutely necessary
+- Show previews before destructive operations
 
-Tool Usage:
-- Use `suggest_column_mapping` to infer or confirm column mappings when uncertain.
-- To preview the submission, update, or deletion payload, call `submit_aggregate_data` with:
-  - `preview_only=True`
-  - a valid `column_mapping`
-  - required `params` value: `"CREATE_AND_UPDATE"` or `"DELETE"`
-  - both `structured_instruction` and `instruction_prompt` arguments.
-
-Submission vs Deletion:
-- To **submit** or **update** data, proceed only if the user clearly says: "submit", "post", "send", or "update".
-  - Call `submit_aggregate_data` with `preview_only=False` and `params="CREATE_AND_UPDATE"`.
-- To **delete** data, proceed only if the user clearly says: "delete", "remove", or "retract".
-  - Call `submit_aggregate_data` with `preview_only=False` and `params="DELETE"`.
-- For all operations, the same required fields must be present in the mapped data.
-
-Clarify Before Acting:
-- If any required field appears missing or is ambiguously mapped, do not proceed silently.
-  - Ask the user for clarification or confirmation.
-  - Clearly explain any assumptions or uncertainties.
-- If the structured instruction or instruction prompt is ambiguous or incomplete, request clarification before proceeding.
-
-Restrictions:
-- Do not access or rely on the full dataframe yourself — only use tools to operate on it.
-- Never use `data_values` directly — the payload must be constructed from the session dataframe using `column_mapping`.
-- Do not build or send a payload unless confident that all required fields are correctly mapped.
-- Never assume user intent. Always confirm before taking submission, update, or deletion actions.
-
-Your goal is to assist with accurate and complete DHIS2 aggregate data submissions, updates, or deletions, using the tools and information available while ensuring full transparency, validation, and user confirmation.
-
+RESPONSE FORMAT:
+- When calling tools, just call them directly
+- When showing results, be concise and clear
+- Never include internal instructions in your responses to users
 """
 
-
-
-
-
-
-
-
+llm = get_llm()
+tools = [submit_aggregate_data, suggest_column_mapping]
 prompt = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
     MessagesPlaceholder(variable_name="messages"),
@@ -101,20 +58,75 @@ prompt = ChatPromptTemplate.from_messages([
 ])
 
 agent = create_openai_tools_agent(llm, tools, prompt)
-openai_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, return_intermediate_steps=True)
+openai_executor = AgentExecutor(
+    agent=agent, 
+    tools=tools, 
+    verbose=False,  # Reduce verbosity to prevent prompt leakage
+    return_intermediate_steps=False,  # Don't return intermediate steps to prevent confusion
+    handle_parsing_errors=True,
+    max_iterations=3  # Reduce iterations to prevent loops
+)
 
 def agent_node(state: AgentState) -> AgentState:
     try:
         messages = state.get("messages", [])
-        column_mapping = suggest_column_mapping.invoke({"columns": state.get("dataframe_columns", [])})
-        st.session_state.suggested_columns_data_entry = column_mapping
-        if column_mapping:
-            column_msg = AIMessage(
-                    content=f"The suggested mapped columns are: {column_mapping}"
-                )
+        
+        # Clear session state if this is a new conversation or new data upload
+        if messages and len(messages) == 1:  # First user message
+            if "suggested_columns_data_entry" in st.session_state:
+                del st.session_state["suggested_columns_data_entry"]
+        
+        # Check if we need to generate or regenerate column mapping
+        should_generate_mapping = False
+        
+        # Case 1: No mapping exists
+        if "raw_data_df_uploaded" in st.session_state and not st.session_state.get("suggested_columns_data_entry"):
+            should_generate_mapping = True
+        
+        # Case 2: Mapping exists but we're starting a new operation (check last user message)
+        elif "raw_data_df_uploaded" in st.session_state and st.session_state.get("suggested_columns_data_entry"):
+            if messages and hasattr(messages[-1], 'content'):
+                last_message = messages[-1].content.lower()
+                # If user is asking for a new operation, regenerate mapping
+                if any(keyword in last_message for keyword in ["submit", "delete", "update", "import", "post", "send", "use", "sure", "proceed"]):
+                    should_generate_mapping = True
+        
+        # Generate column mapping if needed
+        if should_generate_mapping:
+            column_mapping = suggest_column_mapping.invoke({
+                "columns": state.get("dataframe_columns", [])
+            })
+            st.session_state.suggested_columns_data_entry = column_mapping
 
-            messages.append(column_msg)
+            # Add context message
+            context_msg = AIMessage(content=f"""
+Available data: CSV with columns {state.get("dataframe_columns", [])}
+Suggested mapping: {column_mapping}
+Use submit_aggregate_data tool to process this data.
+            """)
+            messages.append(context_msg)
+        
+        # If we have column mapping but no context message, add it
+        elif "raw_data_df_uploaded" in st.session_state and st.session_state.get("suggested_columns_data_entry") and not any("Available data: CSV with columns" in msg.content for msg in messages if hasattr(msg, 'content')):
+            column_mapping = st.session_state.get("suggested_columns_data_entry")
+            context_msg = AIMessage(content=f"""
+Available data: CSV with columns {state.get("dataframe_columns", [])}
+Suggested mapping: {column_mapping}
+Use submit_aggregate_data tool to process this data.
+            """)
+            messages.append(context_msg)
+        
         state["messages"] = messages
+        
+        # Force tool usage by checking if user wants an operation
+        if messages and hasattr(messages[-1], 'content'):
+            last_message = messages[-1].content.lower()
+            if any(keyword in last_message for keyword in ["submit", "delete", "update", "import", "post", "send", "use", "proceed"]):
+                # Add a system message to force tool usage
+                force_tool_msg = AIMessage(content="You must call submit_aggregate_data tool now. Do not respond with text only.")
+                messages.append(force_tool_msg)
+                state["messages"] = messages
+        
         result = openai_executor.invoke(state)  # Pass full state with all messages
         return {
             "messages": result["messages"],

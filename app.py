@@ -682,7 +682,14 @@ if prompt := st.chat_input("Ask DHIS2 Assistant..."):
         )
 
         messages.append(column_msg)
-
+        reminder_msg = AIMessage(
+            content=(
+                "Reminder: Always call the `submit_aggregate_data` tool for any data submission, update, "
+                "or deletion operations. Do not simulate or fake these actions. "
+                "Confirm success only after the tool is actually called."
+            )
+        )
+        messages.append(reminder_msg)
 
         state = {
 
@@ -716,7 +723,17 @@ if prompt := st.chat_input("Ask DHIS2 Assistant..."):
             st.session_state.show_chart = True
 
     elif route == "data_entry":
-
+        # Append a strong reminder to the last user message in state before invoking the executor
+        # Find the last human message in the conversation history
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, HumanMessage):
+                # Append the reminder to the last human message's content
+                msg.content += (
+                    "\n\nIMPORTANT: You must call the tool `submit_aggregate_data` "
+                    "whenever performing any data submission, update, or deletion. "
+                    "Do not simulate or fake tool calls under any circumstances."
+                )
+                break  # Only append once to the most recent human message
 
 
         result = data_entry_executor.invoke(state)
