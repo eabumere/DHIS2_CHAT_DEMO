@@ -100,9 +100,9 @@ def agent_node(state: AgentState) -> AgentState:
 
             # Add context message
             context_msg = AIMessage(content=f"""
-Available data: CSV with columns {state.get("dataframe_columns", [])}
-Suggested mapping: {column_mapping}
-Use submit_aggregate_data tool to process this data.
+                Available data: CSV with columns {state.get("dataframe_columns", [])}
+                Suggested mapping: {column_mapping}
+                Use submit_aggregate_data tool to process this data.
             """)
             messages.append(context_msg)
         
@@ -110,9 +110,9 @@ Use submit_aggregate_data tool to process this data.
         elif "raw_data_df_uploaded" in st.session_state and st.session_state.get("suggested_columns_data_entry") and not any("Available data: CSV with columns" in msg.content for msg in messages if hasattr(msg, 'content')):
             column_mapping = st.session_state.get("suggested_columns_data_entry")
             context_msg = AIMessage(content=f"""
-Available data: CSV with columns {state.get("dataframe_columns", [])}
-Suggested mapping: {column_mapping}
-Use submit_aggregate_data tool to process this data.
+            Available data: CSV with columns {state.get("dataframe_columns", [])}
+            Suggested mapping: {column_mapping}
+            Use submit_aggregate_data tool to process this data.
             """)
             messages.append(context_msg)
         

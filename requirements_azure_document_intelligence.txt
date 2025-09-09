@@ -1,0 +1,39 @@
+# Azure Document Intelligence Requirements
+azure-ai-documentintelligence==1.0.0
+azure-storage-blob==12.19.0
+azure-functions==1.17.0
+azure-core==1.29.5
+azure-identity==1.15.0
+azure-storage-blob
+unstructured
+#also install => pip install "unstructured[pdf]"
+azure-ai-generative
+
+# LangChain Azure Document Intelligence integration
+langchain-community==0.0.20
+langchain==0.1.0
+
+# Additional Azure services
+azure-keyvault-secrets==4.7.0
+azure-appconfiguration==1.4.0
+
+# HTTP requests for DHIS2 API
+requests==2.31.0
+
+# Data processing
+pandas==2.0.3
+numpy==1.24.3
+Pillow==10.0.1
+
+# JSON and configuration
+pydantic==2.4.2
+python-dotenv==1.0.0
+
+# Logging and monitoring
+azure-monitor-opentelemetry==1.0.0
+opentelemetry-api==1.20.0
+opentelemetry-sdk==1.20.0
+
+# For Azure Functions development
+azure-functions-worker==1.0.0
+azure-functions-python==1.0.0 

@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from PIL import Image
 import pdfplumber
 import docx2txt
+import tempfile
 from pptx import Presentation
 from io import BytesIO
 from multi_agent import (
@@ -21,6 +22,7 @@ from multi_agent import (
     data_entry_executor,
     event_data_executor,
     tracker_data_executor,
+    # azure_document_intelligence_executor,
     routing_decision
 )
 from agents.tools.faiss_search.embed_dhis2_faiss_metadata import run_embedding
@@ -34,10 +36,10 @@ DHIS2_BASE_URL = os.getenv("DHIS2_BASE_URL")
 DHIS2_USERNAME = os.getenv("DHIS2_USERNAME")
 DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD")
 
+
 # ========== Helpers ==========
 def generate_distinct_colors(n):
     return [f"hsl({i * 360 / n}, 70%, 50%)" for i in range(n)]
-
 
 
 def get_data(url, doc_type, disaggregations, indicators, periods, org_units):
@@ -56,14 +58,11 @@ def get_data(url, doc_type, disaggregations, indicators, periods, org_units):
             filters={"id": f"in:[{','.join(org_units)}]"}
         )
 
-
         for org in get_the_org:
             org_units_lookup.append({
                 "org": org["name"],
                 "org_id": org["id"],
             })
-
-
 
     dimensions = [
         f"dx:{indicator_string}",
@@ -104,7 +103,7 @@ def get_data(url, doc_type, disaggregations, indicators, periods, org_units):
 
         # Filter flattened items whose category name matches any disaggregation
         if disaggregations is not None:
-            filtered_flattened= []
+            filtered_flattened = []
             for item in flattened:
                 category_name = item["category"].lower().strip()
                 for disaggregation in disaggregations:
@@ -119,7 +118,6 @@ def get_data(url, doc_type, disaggregations, indicators, periods, org_units):
                 opt_id = item["option_id"]
                 disaggregations_dict.setdefault(cat_id, []).append(opt_id)
 
-
             # Construct dimensions list
             dimensions = [
                 f"dx:{indicator_string}",
@@ -133,7 +131,6 @@ def get_data(url, doc_type, disaggregations, indicators, periods, org_units):
                 dimensions.append(f"{cat_id}:{option_string}")
 
             dimensions.append("co")  # ⚠️ Only add this if dx supports category option combos
-
 
         include_num_den = False
         include_coc_dimension = True  # Often useful for DEs
@@ -174,10 +171,11 @@ def get_data(url, doc_type, disaggregations, indicators, periods, org_units):
     except Exception as e:
         return {"error": str(e)}
 
+
 def analytics_to_dataframe(tool_data: dict):
     if "data" not in tool_data:
         return pd.DataFrame()
-    url= tool_data["url"]
+    url = tool_data["url"]
     doc_type = tool_data["doc_type"]
     disaggregations = tool_data["disaggregations"]
     indicators = tool_data["indicators"]
@@ -193,19 +191,18 @@ def analytics_to_dataframe(tool_data: dict):
     org_units_lookup = meta_data.get("org_units_lookup", {}),
     flattened = meta_data.get("flattened", {}),
 
-
     headers = data.get("headers", [])
     rows = data.get("rows", [])
     columns = [header["name"] for header in headers]
     return org_units_lookup, flattened, pd.DataFrame(rows, columns=columns)
 
 
-def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type: str):
-    if df.empty or not selected_indicators:
+def render_chart_chartjs(filtered_df: pd.DataFrame, selected_indicators: list, chart_type: str):
+    if filtered_df.empty or not selected_indicators:
         st.info("No data available or indicators selected.")
         return
 
-    df = df.rename(columns={
+    this_df = filtered_df.rename(columns={
         "Data": "dx",
         "Period": "pe",
         "Organisation unit": "ou",
@@ -215,11 +212,11 @@ def render_chart_chartjs(df: pd.DataFrame, selected_indicators: list, chart_type
     # if "co" in df.columns:
     #     df = df.rename(columns={"co": "Category option combo"})
 
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    this_df["value"] = pd.to_numeric(this_df["value"], errors="coerce")
 
-    grouped = df[df["dx"].isin(selected_indicators)]
+    grouped = this_df[this_df["dx"].isin(selected_indicators)]
     # Define available label columns
-    available_label_columns = ["pe", "ou"] + [col for col in df.columns if col.startswith("co_")]
+    available_label_columns = ["pe", "ou"] + [col for col in this_df.columns if col.startswith("co_")]
 
     # Ensure "pe" is the default (index=0)
     label_column = st.selectbox("Choose x-axis (label) dimension:", options=available_label_columns,
@@ -376,7 +373,8 @@ def render_chart_plotly(df: pd.DataFrame, selected_indicators: list, chart_type:
     filtered_df = df[df["dx"].isin(selected_indicators)]
 
     if chart_type == "bar":
-        fig = px.bar(filtered_df, x="pe", y="value", color="dx", barmode="group", title="DHIS2 Analytics Chart (Plotly)")
+        fig = px.bar(filtered_df, x="pe", y="value", color="dx", barmode="group",
+                     title="DHIS2 Analytics Chart (Plotly)")
     elif chart_type == "line":
         fig = px.line(filtered_df, x="pe", y="value", color="dx", markers=True, title="DHIS2 Analytics Chart (Plotly)")
     elif chart_type == "pie" and len(selected_indicators) == 1:
@@ -449,12 +447,10 @@ def chart_data(result_, chart_backend):
             # Replace `co` using option_map
             replace_if_exists(raw_data_df, 'co', option_map)
 
-
             # Replace `co_1`, `co_2`, ..., using category_map
-            if len(disagg_cols)>0:
+            if len(disagg_cols) > 0:
                 for col in disagg_cols:
                     replace_if_exists(raw_data_df, col, option_map)
-
 
             indicators = raw_data_df["dx"].dropna().unique().tolist()
             periods = sorted(raw_data_df["pe"].dropna().unique().tolist())
@@ -477,7 +473,6 @@ def chart_data(result_, chart_backend):
 
             # Filters
 
-
             selected_indicators = st.multiselect("Select indicator(s)", indicators, default=indicators[:1])
             if len(org_units) > 0:
                 selected_org_units = st.multiselect("Select org unit(s)", org_units, default=org_units)
@@ -498,7 +493,7 @@ def chart_data(result_, chart_backend):
             filtered_df = raw_data_df[
                 raw_data_df["dx"].isin(selected_indicators) &
                 raw_data_df["pe"].isin(selected_periods)
-            ]
+                ]
             # & raw_data_df[raw_data_df.columns[2]].isin(selected_org_units)
 
         else:
@@ -506,7 +501,7 @@ def chart_data(result_, chart_backend):
             filtered_df = raw_data_df[
                 raw_data_df["dx"].isin(selected_indicators) &
                 raw_data_df["pe"].isin(selected_periods)
-            ]
+                ]
         # filtered_df.to_csv("filtered_df_8.csv")
         # Apply co_* filters
         for co_col, selected_vals in selected_cos.items():
@@ -527,287 +522,478 @@ def chart_data(result_, chart_backend):
     else:
         st.warning("No valid data or required columns missing.")
 
+
 # ========== App UI ==========
 
 st.set_page_config(page_title="DHIS2 Assistant", layout="wide")
-# ========== Side Bar ==========
-# ===== Initialize session state =====
-if "side_bar_open" not in st.session_state:
-    st.session_state.side_bar_open = False
-if "side_bar_open_button" not in st.session_state:
-    st.session_state.side_bar_open_button = True
 
-if st.session_state.get("side_bar_open_button"):
-    if st.button("🛠️"):
-        st.session_state.side_bar_open = True
+# Navigation
+st.sidebar.header("🧭 Navigation")
+page = st.sidebar.selectbox(
+    "Choose Interface",
+    ["Main Chat", "About"]
+)
 
-if st.session_state.get("side_bar_open"):
-    # Simulate a menu using the sidebar
-    st.session_state.side_bar_open_button = False
-    with st.sidebar:
-        st.header("Settings")
-        # if st.button("▶ Run Script"):
-        #     # result = run_my_code()
-        #     st.success("Button pressed")
-        with st.expander("⚙️ Advanced Options"):
-            if st.button("Run Metadata Embedder"):
-                with st.spinner("Embedding and indexing metadata..."):
-                    run_embedding()
-                st.success("Metadata embedded.")
+if page == "Main Chat":
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        st.image("fhi360.png")
+    with col2:
+        st.title("🗨️ DHIS2 Chat Assistant")
+
+    st.markdown("""
+    **Available Agents:**
+
+    1. **📊 Metadata Agent** - Create, update, delete, or retrieve DHIS2 metadata
+    2. **📈 Analytics Agent** - Generate charts, reports, trends, and summaries
+    3. **📝 Data Entry Agent** - Enter or update aggregate data values
+    4. **📅 Event Data Agent** - Handle event-based program data
+    5. **👥 Tracker Data Agent** - Manage tracked entity operations
+
+    **Try these examples:**
+    - "Create a new dataset for malaria cases"
+    - "Show me a trend of ANC visits in Bo district"
+    - "Enter 25 malaria cases for Bombali for January"
+    - "Process this facility register with Azure Document Intelligence"
+    """)
+
+# elif page == "Azure Document Intelligence":
+#     st.header("☁️ Azure Document Intelligence")
+#     st.markdown("""
+#     **Enterprise-grade document processing using Azure Document Intelligence (Form Recognizer).**
+#
+#     This interface provides:
+#     - 🤖 Custom model training for facility register layouts
+#     - ✍️ High-accuracy handwriting recognition
+#     - 🗺️ Automated DHIS2 mapping and validation
+#     - 📊 Production-ready monitoring and analytics
+#     """)
+#
+#     # Check if Azure credentials are configured
+#     azure_configured = all([
+#         os.getenv("AZURE_FORM_RECOGNIZER_ENDPOINT"),
+#         os.getenv("AZURE_FORM_RECOGNIZER_KEY"),
+#         os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+#     ])
+#
+#     if azure_configured:
+#         st.success("✅ Azure credentials configured")
+#
+#         # Launch Azure Document Intelligence app
+#         st.markdown("""
+#         **To access the full Azure Document Intelligence interface, run:**
+#         ```bash
+#         streamlit run azure_document_intelligence_app.py
+#         ```
+#         """)
+#
+#         # Show a preview of features
+#         col1, col2, col3 = st.columns(3)
+#
+#         with col1:
+#             st.subheader("📄 Document Processing")
+#             st.markdown("""
+#             - Upload facility registers
+#             - Layout analysis
+#             - Custom model processing
+#             - Handwriting recognition
+#             """)
+#
+#         with col2:
+#             st.subheader("🤖 Model Training")
+#             st.markdown("""
+#             - Train custom models
+#             - Upload training data
+#             - Monitor training status
+#             - Deploy model versions
+#             """)
+#
+#         with col3:
+#             st.subheader("🗺️ DHIS2 Integration")
+#             st.markdown("""
+#             - Automatic mapping
+#             - Data validation
+#             - Confidence scoring
+#             - DHIS2 submission
+#             """)
+#     else:
+#         st.warning("⚠️ Azure credentials not configured")
+#         st.markdown("""
+#         **To use Azure Document Intelligence, configure these environment variables:**
+#         - `AZURE_FORM_RECOGNIZER_ENDPOINT`
+#         - `AZURE_FORM_RECOGNIZER_KEY`
+#         - `AZURE_STORAGE_CONNECTION_STRING`
+#         """)
+
+elif page == "About":
+    st.header("ℹ️ About the System")
+
+    st.markdown("""
+    ## 🤖 Multi-Agent Architecture
+
+    This DHIS2 assistant uses a sophisticated multi-agent system with specialized AI agents:
+
+    ### **Available Agents**
+
+    1. **📊 Metadata Agent**
+       - Manages DHIS2 metadata (datasets, programs, data elements, org units)
+       - Create, update, delete, and retrieve metadata
+       - Examples: "Create a new dataset", "What is the UID for ANC visits?"
+
+    2. **📈 Analytics Agent**
+       - Generates charts, reports, trends, and summaries
+       - Computes totals, averages, and breakdowns
+       - Examples: "Show me a trend of malaria cases", "What's the total for Bo district?"
+
+    3. **📝 Data Entry Agent**
+       - Handles aggregate data entry and updates
+       - Works with standard datasets and data elements
+       - Examples: "Enter 25 malaria cases for Bombali for January"
+
+    4. **📅 Event Data Agent**
+       - Manages event-based program data
+       - Handles single events without registration
+       - Examples: "Record a malaria event in Kenema on March 5th"
+
+    5. **👥 Tracker Data Agent**
+       - Manages tracked entity operations
+       - Handles registrations, follow-ups, and tracked events
+       - Examples: "Register a pregnant woman for ANC", "Record a follow-up visit"
+
+    6. **📄 Document Intelligence Agent**
+       - Processes scanned documents and facility registers
+       - Analyzes document structure and table layouts
+       - Maps document columns to DHIS2 metadata
+       - Converts handwritten data to DHIS2 JSON payloads
+
+    7. **☁️ Azure Document Intelligence Agent**
+       - Enterprise-grade document processing with Azure services
+       - Custom model training for facility register layouts
+       - High-accuracy handwriting recognition
+       - Production-ready document processing pipeline
+
+    ### **How It Works**
+
+    1. **Intelligent Routing**: The system automatically routes your request to the most appropriate agent
+    2. **Specialized Processing**: Each agent handles specific types of DHIS2 operations
+    3. **Context Awareness**: Agents maintain context and can handle complex multi-step operations
+    4. **Error Handling**: Robust error handling and recovery mechanisms
+
+    ### **Technologies Used**
+
+    - **LangGraph**: Multi-agent orchestration and state management
+    - **LangChain**: AI agent framework and tool integration
+    - **Azure OpenAI**: Large language models for natural language understanding
+    - **Azure Document Intelligence**: Enterprise document processing
+    - **Streamlit**: User interface and interaction
+    - **DHIS2 API**: Integration with DHIS2 systems
+
+    ### **Getting Started**
+
+    1. **Main Chat**: Use the main chat interface for general DHIS2 operations
+    2. **Document Intelligence**: Process scanned documents with local OCR
+    3. **Azure Document Intelligence**: Enterprise-grade document processing
+    4. **About**: Learn more about the system architecture
+
+    ### **Examples**
+
+    **Metadata Operations:**
+    - "Create a new dataset for malaria cases"
+    - "What data elements are available for ANC visits?"
+    - "Update the malaria dataset description"
+
+    **Analytics Queries:**
+    - "Show me a trend of malaria cases over the last 6 months"
+    - "What's the total number of ANC visits in Bo district?"
+    - "Generate a report of immunization coverage"
+
+    **Data Entry:**
+    - "Enter 25 malaria cases for Bombali for January 2024"
+    - "Update the ANC visits count for Kenema clinic"
+    - "Delete the incorrect malaria data for March"
+
+    **Document Processing:**
+    - "Process this facility register with Azure Document Intelligence"
+    - "Train a custom model for our facility register layout"
+    - "Map the extracted data to DHIS2 metadata"
+    """)
+
+# Continue with the main chat interface only if "Main Chat" is selected
+if page == "Main Chat":
+    # ========== Side Bar ==========
+    # ===== Initialize session state =====
+    if "side_bar_open" not in st.session_state:
+        st.session_state.side_bar_open = False
+    if "side_bar_open_button" not in st.session_state:
+        st.session_state.side_bar_open_button = True
+
+    if st.session_state.get("side_bar_open_button"):
+        if st.button("🛠️"):
+            st.session_state.side_bar_open = True
+
+    if st.session_state.get("side_bar_open"):
+        # Simulate a menu using the sidebar
+        st.session_state.side_bar_open_button = False
+        with st.sidebar:
+            st.header("Settings")
+            # if st.button("▶ Run Script"):
+            #     # result = run_my_code()
+            #     st.success("Button pressed")
+            with st.expander("⚙️ Advanced Options"):
+                if st.button("Run Metadata Embedder"):
+                    with st.spinner("Embedding and indexing metadata..."):
+                        run_embedding()
+                    st.success("Metadata embedded.")
 
 
-
-col1, col2 = st.columns([1, 5])
-with col1:
-    st.image("fhi360.png")
-with col2:
-    st.title("🗨️ DHIS2 Chat Assistant")
-upload_file = st.file_uploader(
+    upload_file = st.file_uploader(
         "➕ Upload file",
         type=["csv", "xlsx", "xls", "pdf", "png", "jpg", "jpeg", "docx", "doc", "ppt", "pptx"]
     )
 
+    if upload_file is not None:
+        file_name = upload_file.name.lower()
+        st.write(f"📁 File uploaded: `{file_name}`")
 
+        try:
+            if file_name.endswith(".csv"):
+                df = pd.read_csv(upload_file)
+                st.session_state.raw_data_df_uploaded = df
+                st.success("✅ CSV loaded")
+                st.dataframe(df)
 
-if upload_file is not None:
-    file_name = upload_file.name.lower()
-    st.write(f"📁 File uploaded: `{file_name}`")
+            elif file_name.endswith((".xlsx", ".xls")):
+                df = pd.read_excel(upload_file)
+                st.session_state.raw_data_df_uploaded = df
+                st.success("✅ Excel loaded")
+                st.dataframe(df)
 
-    try:
-        if file_name.endswith(".csv"):
-            df = pd.read_csv(upload_file)
-            st.session_state.raw_data_df_uploaded = df
-            st.success("✅ CSV loaded")
-            st.dataframe(df)
+            elif file_name.endswith(".pdf"):
+                # Create a named temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                    tmp_file.write(upload_file.read())  # write uploaded content to temp file
+                    tmp_path = tmp_file.name  # store path to tempfile
+                    # Store both the parsed text and metadata in session_state
+                    st.session_state.pdf_file = tmp_path
+                    st.session_state.pdf_filename = file_name
 
-        elif file_name.endswith((".xlsx", ".xls")):
-            df = pd.read_excel(upload_file)
-            st.session_state.raw_data_df_uploaded = df
-            st.success("✅ Excel loaded")
-            st.dataframe(df)
+                    st.success(f"✅ Submitted (original: {file_name})")
+                    # st.text_area("📄 PDF Text", full_text, height=300)
 
-        elif file_name.endswith(".pdf"):
-            with pdfplumber.open(BytesIO(upload_file.read())) as pdf:
-                full_text = "\n".join([page.extract_text() or "" for page in pdf.pages])
-            st.session_state.pdf_text = full_text
-            st.success("✅ PDF parsed")
-            st.text_area("📄 PDF Text", full_text, height=300)
+            elif file_name.endswith((".png", ".jpg", ".jpeg")):
+                image = Image.open(upload_file)
+                st.session_state.uploaded_image = image
+                st.success("✅ Image loaded")
+                st.image(image, caption="Uploaded Image", use_column_width=True)
 
-        elif file_name.endswith((".png", ".jpg", ".jpeg")):
-            image = Image.open(upload_file)
-            st.session_state.uploaded_image = image
-            st.success("✅ Image loaded")
-            st.image(image, caption="Uploaded Image", use_column_width=True)
+            elif file_name.endswith(".docx"):
+                text = docx2txt.process(upload_file)
+                st.session_state.word_text = text
+                st.success("✅ DOCX parsed")
+                st.text_area("📄 Word Text", text, height=300)
 
-        elif file_name.endswith(".docx"):
-            text = docx2txt.process(upload_file)
-            st.session_state.word_text = text
-            st.success("✅ DOCX parsed")
-            st.text_area("📄 Word Text", text, height=300)
+            elif file_name.endswith(".doc"):
+                st.warning("Legacy `.doc` support is limited. Please convert to `.docx` for better results.")
+                st.session_state.word_text = ""
 
-        elif file_name.endswith(".doc"):
-            st.warning("Legacy `.doc` support is limited. Please convert to `.docx` for better results.")
-            st.session_state.word_text = ""
+            elif file_name.endswith(".pptx"):
+                prs = Presentation(upload_file)
+                slides_text = []
+                for slide in prs.slides:
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text"):
+                            slides_text.append(shape.text)
+                full_text = "\n".join(slides_text)
+                st.session_state.ppt_text = full_text
+                st.success("✅ PowerPoint parsed")
+                st.text_area("📄 Slides Text", full_text, height=300)
 
-        elif file_name.endswith(".pptx"):
-            prs = Presentation(upload_file)
-            slides_text = []
-            for slide in prs.slides:
-                for shape in slide.shapes:
-                    if hasattr(shape, "text"):
-                        slides_text.append(shape.text)
-            full_text = "\n".join(slides_text)
-            st.session_state.ppt_text = full_text
-            st.success("✅ PowerPoint parsed")
-            st.text_area("📄 Slides Text", full_text, height=300)
+            elif file_name.endswith(".ppt"):
+                st.warning("Legacy `.ppt` support is limited. Please convert to `.pptx` for better results.")
+                st.session_state.ppt_text = ""
 
-        elif file_name.endswith(".ppt"):
-            st.warning("Legacy `.ppt` support is limited. Please convert to `.pptx` for better results.")
-            st.session_state.ppt_text = ""
+            else:
+                st.warning("Unsupported file type.")
 
-        else:
-            st.warning("Unsupported file type.")
+        except Exception as e:
+            st.error(f"❌ Error reading file: {e}")
 
-    except Exception as e:
-        st.error(f"❌ Error reading file: {e}")
+    # ========== Side bar =============
 
-# ========== Side bar =============
+    # # Simulate a menu using the sidebar
+    # with st.sidebar:
+    #     st.header("Settings")
+    #     # if st.button("▶ Run Script"):
+    #     #     # result = run_my_code()
+    #     #     st.success("Button pressed")
+    #     with st.expander("⚙️ Advanced Options"):
+    #         if st.button("Run Metadata Embedder"):
+    #             with st.spinner("Embedding and indexing metadata..."):
+    #                 run_embedding()
+    #             st.success("Metadata embedded.")
 
-# # Simulate a menu using the sidebar
-# with st.sidebar:
-#     st.header("Settings")
-#     # if st.button("▶ Run Script"):
-#     #     # result = run_my_code()
-#     #     st.success("Button pressed")
-#     with st.expander("⚙️ Advanced Options"):
-#         if st.button("Run Metadata Embedder"):
-#             with st.spinner("Embedding and indexing metadata..."):
-#                 run_embedding()
-#             st.success("Metadata embedded.")
+    # Chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "suggestions" not in st.session_state:
+        st.session_state.suggestions = []
+    if "show_chart" not in st.session_state:
+        st.session_state.show_chart = False
 
-# Chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "suggestions" not in st.session_state:
-    st.session_state.suggestions = []
-if "show_chart" not in st.session_state:
-    st.session_state.show_chart = False
+    if "show_suggestion_options" not in st.session_state:
+        st.session_state.show_suggestion_options = False
 
-if "show_suggestion_options" not in st.session_state:
-    st.session_state.show_suggestion_options = False
+    for msg in st.session_state.messages:
+        role = "assistant" if isinstance(msg, AIMessage) else "user"
+        with st.chat_message(role):
+            st.markdown(msg.content)
 
-for msg in st.session_state.messages:
-    role = "assistant" if isinstance(msg, AIMessage) else "user"
-    with st.chat_message(role):
-        st.markdown(msg.content)
-
-if prompt := st.chat_input("Ask DHIS2 Assistant..."):
-    user_msg = HumanMessage(content=prompt)
-    st.session_state.messages.append(user_msg)
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    state = {
-        "messages": st.session_state.messages
-    }
-    raw_df = st.session_state.get("raw_data_df_uploaded", None)
-    columns = raw_df.columns.tolist() if raw_df is not None else []
-    # Inject column info message FIRST so it's in context before invoking
-    messages = st.session_state.get("messages", []).copy()
-    if columns:
-        column_msg = AIMessage(
-
-            content=f"The uploaded data contains the following columns: {columns}"
-
-        )
-
-        messages.append(column_msg)
-        reminder_msg = AIMessage(
-            content=(
-                "Reminder: Always call the `submit_aggregate_data` tool for any data submission, update, "
-                "or deletion operations. Do not simulate or fake these actions. "
-                "Confirm success only after the tool is actually called."
-            )
-        )
-        messages.append(reminder_msg)
+    if prompt := st.chat_input("Ask DHIS2 Assistant..."):
+        user_msg = HumanMessage(content=prompt)
+        st.session_state.messages.append(user_msg)
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
         state = {
-
-            "messages": messages,
-            "dataframe": raw_df,  # Optional: pass the actual dataframe too
-            "dataframe_columns": columns  # Required: LLM needs column names
-            # "pdf_text": st.session_state.get("pdf_text", None),
-            # "image": st.session_state.get("uploaded_image", None),
-            # "word_text": st.session_state.get("word_text", None),
-            # "ppt_text": st.session_state.get("ppt_text", None)
-
+            "messages": st.session_state.messages
         }
-    route = routing_decision(state)
+        raw_df = st.session_state.get("raw_data_df_uploaded", None)
+        columns = raw_df.columns.tolist() if raw_df is not None else []
+        # Inject column info message FIRST so it's in context before invoking
+        messages = st.session_state.get("messages", []).copy()
+        if columns:
+            column_msg = AIMessage(
 
+                content=f"The uploaded data contains the following columns: {columns}"
 
-    if route == "metadata":
-        result = metadata_agent_executor.invoke(state)
-    elif route == "analytics":
-        result = analytics_executor.invoke(state)
-        metadata_result = result.get("metadata_result", "")
+            )
 
-
-        if metadata_result and metadata_result.get("status") == "multiple_matches":
-            suggestions = metadata_result["suggestions"]
-            st.session_state.suggestions = suggestions
-            st.session_state.show_suggestion_options = True
-
-
-        else:
-            st.session_state.result = result
-            st.session_state.show_chart = True
-
-    elif route == "data_entry":
-        # Append a strong reminder to the last user message in state before invoking the executor
-        # Find the last human message in the conversation history
-        for msg in reversed(state["messages"]):
-            if isinstance(msg, HumanMessage):
-                # Append the reminder to the last human message's content
-                msg.content += (
-                    "\n\nIMPORTANT: You must call the tool `submit_aggregate_data` "
-                    "whenever performing any data submission, update, or deletion. "
-                    "Do not simulate or fake tool calls under any circumstances."
+            messages.append(column_msg)
+            reminder_msg = AIMessage(
+                content=(
+                    "Reminder: Always call the `submit_aggregate_data` tool for any data submission, update, "
+                    "or deletion operations. Do not simulate or fake these actions. "
+                    "Confirm success only after the tool is actually called."
                 )
-                break  # Only append once to the most recent human message
+            )
+            messages.append(reminder_msg)
+
+            state = {
+
+                "messages": messages,
+                "dataframe": raw_df,  # Optional: pass the actual dataframe too
+                "dataframe_columns": columns,  # Required: LLM needs column names
+                "pdf_file": st.session_state.get("pdf_file", None),
+                # "image": st.session_state.get("uploaded_image", None),
+                # "word_text": st.session_state.get("word_text", None),
+                # "ppt_text": st.session_state.get("ppt_text", None)
+
+            }
+        route = routing_decision(state)
+
+        if route == "metadata":
+            result = metadata_agent_executor.invoke(state)
+        elif route == "analytics":
+            result = analytics_executor.invoke(state)
+            metadata_result = result.get("metadata_result", "")
+
+            if metadata_result and metadata_result.get("status") == "multiple_matches":
+                suggestions = metadata_result["suggestions"]
+                st.session_state.suggestions = suggestions
+                st.session_state.show_suggestion_options = True
 
 
-        result = data_entry_executor.invoke(state)
-    elif route == "event_data":
-        result = event_data_executor.invoke(state)
-    elif route == "tracker_data":
-        result = tracker_data_executor.invoke(state)
-    else:
-        error_msg = AIMessage(content="❌ Unknown routing decision.")
-        st.session_state.messages.append(error_msg)
-        st.chat_message("assistant").markdown(error_msg.content)
-        st.stop()
+            else:
+                st.session_state.result = result
+                st.session_state.show_chart = True
 
-    if len(st.session_state.suggestions) < 1:
+        elif route == "data_entry":
+            # Append a strong reminder to the last user message in state before invoking the executor
+            # Find the last human message in the conversation history
+            for msg in reversed(state["messages"]):
+                if isinstance(msg, HumanMessage):
+                    # Append the reminder to the last human message's content
+                    msg.content += (
+                        "\n\nIMPORTANT: You must call the tool `submit_aggregate_data` "
+                        "whenever performing any data submission, update, or deletion. "
+                        "Do not simulate or fake tool calls under any circumstances."
+                    )
+                    break  # Only append once to the most recent human message
+
+            result = data_entry_executor.invoke(state)
+        elif route == "event_data":
+            result = event_data_executor.invoke(state)
+        elif route == "tracker_data":
+            result = tracker_data_executor.invoke(state)
+            # print(result)
+        # elif route == "azure_document_intelligence":
+        #     result = azure_document_intelligence_executor.invoke(state)
+        else:
+            error_msg = AIMessage(content="❌ Unknown routing decision.")
+            st.session_state.messages.append(error_msg)
+            st.chat_message("assistant").markdown(error_msg.content)
+            st.stop()
+
+        if len(st.session_state.suggestions) < 1:
+            output = result.get("output")
+            assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+            st.session_state.messages.append(assistant_msg)
+            with st.chat_message("assistant"):
+                st.markdown(assistant_msg.content)
+
+        if st.session_state.get("show_chart", False):
+            chart_data(st.session_state.result, "chartjs")
+
+    # Show metadata options after user prompt
+    if st.session_state.get("show_suggestion_options", False):
+        with st.chat_message("assistant"):
+            st.markdown("There are multiple metadata matches. Please choose one:")
+
+            for i, option in enumerate(st.session_state.suggestions):
+                label = f"{option['name']} ({option['doc_type']})"
+                if st.button(label, key=f"metadata_option_{i}"):
+                    st.session_state.selected_metadata = option  # Store full dict (id, name, doc_type, score)
+                    st.session_state.trigger_metadata_retry = True  # 🔁 trigger new processing
+                    st.session_state.show_suggestion_options = False
+                    st.rerun()
+
+    if st.session_state.get("trigger_metadata_retry"):
+        selected = st.session_state.selected_metadata
+
+        # Reconstruct the last actual user question
+        original_user_msg = ""
+        for msg in reversed(st.session_state.messages):
+            if isinstance(msg, HumanMessage):
+                original_user_msg = msg.content
+                break
+
+        # Build a clearer retry message with metadata reference
+        augmented_msg = HumanMessage(
+            # content=f"{original_user_msg} (selected: {selected['id']} - {selected['name']})"
+            content=f"{selected['doc_type']} selected:  {selected['name']} -  {selected['id']})"
+
+        )
+
+        st.session_state.messages.append(augmented_msg)
+
+        with st.chat_message("user"):
+            st.markdown(original_user_msg)  # ✅ Show only original question in UI
+
+        # Re-invoke agent
+        state = {"messages": st.session_state.messages}
+        result = analytics_executor.invoke(state)
+
+        st.session_state.result = result
+        st.session_state.show_chart = True
+        st.session_state.trigger_metadata_retry = False
+
         output = result.get("output")
         assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
         st.session_state.messages.append(assistant_msg)
+
         with st.chat_message("assistant"):
             st.markdown(assistant_msg.content)
 
-
-if st.session_state.get("show_chart", False):
-    chart_data(st.session_state.result, "chartjs")
-
-# Show metadata options after user prompt
-if st.session_state.get("show_suggestion_options", False):
-    with st.chat_message("assistant"):
-        st.markdown("There are multiple metadata matches. Please choose one:")
-
-        for i, option in enumerate(st.session_state.suggestions):
-            label = f"{option['name']} ({option['doc_type']})"
-            if st.button(label, key=f"metadata_option_{i}"):
-                st.session_state.selected_metadata = option  # Store full dict (id, name, doc_type, score)
-                st.session_state.trigger_metadata_retry = True  # 🔁 trigger new processing
-                st.session_state.show_suggestion_options = False
-                st.rerun()
-
-if st.session_state.get("trigger_metadata_retry"):
-    selected = st.session_state.selected_metadata
-
-    # Reconstruct the last actual user question
-    original_user_msg = ""
-    for msg in reversed(st.session_state.messages):
-        if isinstance(msg, HumanMessage):
-            original_user_msg = msg.content
-            break
-
-    # Build a clearer retry message with metadata reference
-    augmented_msg = HumanMessage(
-        # content=f"{original_user_msg} (selected: {selected['id']} - {selected['name']})"
-        content = f"{selected['doc_type']} selected:  {selected['name']} -  {selected['id']})"
-
-    )
-
-    st.session_state.messages.append(augmented_msg)
-
-    with st.chat_message("user"):
-        st.markdown(original_user_msg)  # ✅ Show only original question in UI
-
-    # Re-invoke agent
-    state = {"messages": st.session_state.messages}
-    result = analytics_executor.invoke(state)
-
-    st.session_state.result = result
-    st.session_state.show_chart = True
-    st.session_state.trigger_metadata_retry = False
-
-    output = result.get("output")
-    assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
-    st.session_state.messages.append(assistant_msg)
-
-    with st.chat_message("assistant"):
-        st.markdown(assistant_msg.content)
-
-    st.rerun()  # ✅ Force chart to render
+        st.rerun()  # ✅ Force chart to render
 
 

@@ -1,26 +1,18 @@
-# from metadata_tools import create_metadata
-#
-# with open("test.json") as f:
-#     payload = f.read()
-#
-# print(create_metadata(payload))
-import requests
+#tester.py
 
-payload = {"categories": [{"id": "HivKJ5xcA6w"}]}
-params= {"importStrategy": "DELETE"}
-DHIS2_BASE_URL = "https://play.im.dhis2.org/stable-2-42-1"
-DHIS2_USERNAME = "admin"
-DHIS2_PASSWORD = "district"
+from azure_document_tracker_tools import  upload_to_blob_storage, analyze_with_layout_model
 
-try:
-    print(params)
-    url = f"{DHIS2_BASE_URL}/api/metadata"
-    response = requests.post(url, auth=(DHIS2_USERNAME, DHIS2_PASSWORD), json=payload, params=params)
-    response.raise_for_status()
-    print(response.json())
+files = ["ART Register_1.pdf"]
+for file_path in files:
 
-except requests.exceptions.HTTPError as http_err:
-    print("HTTP error:", response.status_code)
-    print("Response content:", response.text)
-except Exception as e:
-    print({"status": "error", "message": str(e)})
+    # Open the PDF as bytes
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+    result = upload_to_blob_storage.invoke({"file": file_bytes, "filename":file_path})
+
+    blob_url = result["blob_url"]
+    print(blob_url)
+    analyzed_table = analyze_with_layout_model.invoke({"blob_url": blob_url, "limit": 3000, "model": "prebuilt-layout"})
+    print(analyzed_table)
+
+

@@ -4,7 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import BaseMessage, AIMessage
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_models import AzureChatOpenAI
-from langchain.memory import ChatMessageHistory
+from langchain_community.chat_message_histories import ChatMessageHistory
 from dotenv import load_dotenv
 from typing import List, TypedDict, Optional, Union
 import os
@@ -22,6 +22,7 @@ from agents.analytics_agent import analytics_executor
 from agents.tracker_data_agent import tracker_data_executor
 from agents.event_data_agent import event_data_executor
 from agents.data_entry_agent import data_entry_executor
+# from agents.azure_document_intelligence_agent import azure_document_intelligence_executor
 
 
 # --- State ---
@@ -31,35 +32,37 @@ class AgentState(TypedDict, total=False):
 # --- Routing Prompt ---
 system_prompt = """
 You are a dispatcher agent for a DHIS2 assistant.
-Your job is to decide which specialized agent should handle the user’s request.
+Your job is to decide which specialized agent should handle the user's request.
 
 There are five available agents:
 
 1. **Metadata Agent** (`metadata_agent`)
    - Use for operations like creating, updating, deleting, or retrieving metadata:
      - Examples: datasets, programs, data elements, org units, indicators, categories.
-     - e.g., “Create a new dataset”, “What is the UID for ANC visits?”
+     - e.g., "Create a new dataset", "What is the UID for ANC visits?"
 
 2. **Analytics Agent** (`analytics_agent`)
    - Use for analytical queries:
      - Generating charts, reports, trends, or summaries.
      - Computing totals, averages, or performing breakdowns.
-     - e.g., “Show me a trend of malaria cases”, “What’s the total for Bo district?”
+     - e.g., "Show me a trend of malaria cases", "What's the total for Bo district?"
 
 3. **Data Entry Agent** (`data_entry_agent`)
    - Use for entering or updating aggregate data values:
      - Standard data sets or data elements (not program-based).
-     - e.g., “Enter 25 malaria cases for Bombali for January.”
+     - e.g., "Enter 25 malaria cases for Bombali for January."
 
 4. **Event Data Agent** (`event_data_agent`)
    - Use for entering data for event-based (non-tracker) programs:
      - Typically no registration, just single events.
-     - e.g., “Record a malaria event in Kenema on March 5th.”
+     - e.g., "Record a malaria event in Kenema on March 5th."
 
 5. **Tracker Data Agent** (`tracker_data_agent`)
    - Use for tracked entity operations (registration-based):
      - Includes persons, follow-up visits, tracked events.
-     - e.g., “Register a pregnant woman for ANC”, “Record a follow-up visit for ID XYZ.”
+     - e.g., "Register a pregnant woman for ANC", "Record a follow-up visit for ID XYZ."
+
+
 
 Respond with **only one** of the following values (and nothing else):
 - `metadata_agent`
@@ -68,7 +71,14 @@ Respond with **only one** of the following values (and nothing else):
 - `event_data_agent`
 - `tracker_data_agent`
 """
-
+# 6. **Azure Document Intelligence Agent** (`azure_document_intelligence_agent`)
+#    - Use for enterprise-grade document processing with Azure services:
+#      - Custom model training for facility register layouts
+#      - High-accuracy handwriting recognition with Azure Document Intelligence
+#      - Automated DHIS2 mapping and validation
+#      - Production-ready document processing pipeline
+#      - e.g., "Train a custom model for facility registers", "Process with Azure Document Intelligence", "Deploy model version"
+# - `azure_document_intelligence_agent`
 # --- Prompt Template ---
 router_prompt = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
@@ -103,7 +113,8 @@ def routing_decision(state: AgentState) -> str:
             "analytics_agent": "analytics",
             "data_entry_agent": "data_entry",
             "event_data_agent": "event_data",
-            "tracker_data_agent": "tracker_data"
+            "tracker_data_agent": "tracker_data",
+            # "azure_document_intelligence_agent": "azure_document_intelligence"
         }
 
         # Strict match on cleaned decision
@@ -121,17 +132,23 @@ def routing_decision(state: AgentState) -> str:
             ],
             "data_entry_agent": ["aggregate", "aggregate data entry", "data entry"
                 "form", "submit", "enter value", "fill form",
-                "create data", "update data", "delete data"
+                "create aggregate data", "update data", "delete data"
             ],
             "event_data_agent": [
                 "event", "single event", "event program", "malaria event", "non-tracker event"
             ],
             "tracker_data_agent": [
-                "tracked", "tei", "enrollment", "enrol", "visit", "follow-up", "tracked entity"
-            ]
+                "tracked", "tei", "enrollment", "enrol", "visit", "follow-up", "tracked entity", "patients", "ART Register"
+            ],
+            # "azure_document_intelligence_agent": ["scanned", "scanned document",
+            #                                       "facility register", "handwritten", "convert",
+            #                                       "azure", "custom model", "train model",
+            #                                       "enterprise", "production",
+            #                                       "azure document intelligence",
+            #                                       "picture", "image", "extract"]
         }
 
-        def keyword_fallback(text: str) -> str:
+        def keyword_fallback(this_text: str) -> str:
             for agent, keywords in keyword_routes.items():
                 if any(k in text for k in keywords):
                     print(f"Routing based on keyword fallback to: {agent}")
@@ -182,6 +199,12 @@ def data_entry_node(state: AgentState) -> AgentState:
     state["messages"].append(output if isinstance(output, AIMessage) else AIMessage(content=str(output)))
     return state
 
+# def azure_document_intelligence_node(state: AgentState) -> AgentState:
+#     result = azure_document_intelligence_executor.invoke({"messages": state["messages"]})
+#     output = result.get("output")
+#     state["messages"].append(output if isinstance(output, AIMessage) else AIMessage(content=str(output)))
+#     return state
+
 
 # --- Graph Setup ---
 graph = StateGraph(AgentState)
@@ -191,6 +214,7 @@ graph.add_node("analytics", analytics_node)
 graph.add_node("data_entry", data_entry_node)
 graph.add_node("event_data", event_data_node)
 graph.add_node("tracker_data", tracker_data_node)
+# graph.add_node("azure_document_intelligence", azure_document_intelligence_node)
 
 graph.set_entry_point("dispatcher")
 
@@ -201,11 +225,11 @@ graph.add_conditional_edges("dispatcher", routing_decision, {
     "event_data": "event_data",
     "tracker_data": "tracker_data"
 })
-
+#"azure_document_intelligence": "azure_document_intelligence"
 # Terminal edges from agent nodes to END
 for node in ["metadata", "analytics", "data_entry", "event_data", "tracker_data"]:
     graph.add_edge(node, END)
-
+ #"azure_document_intelligence"
 compiled_multi_agent = graph.compile()
 
 # --- Session Memory ---
