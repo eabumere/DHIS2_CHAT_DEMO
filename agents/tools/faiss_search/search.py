@@ -122,8 +122,8 @@ def filter_documents_by_metadata(doc_type: str, filters: dict = None):
 
     return results
 
-# print(hybrid_search("received HIV Testing Services (HTS) and received their test results"))
-# hybrid_search("HTS_TST")
+# # print(hybrid_search("received HIV Testing Services (HTS) and received their test results"))
+# hybrid_search("Andulo")
 
 # Get all org units with level == 2
 

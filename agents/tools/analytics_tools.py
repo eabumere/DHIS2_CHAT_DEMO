@@ -8,7 +8,7 @@ from langchain_core.documents import Document
 from langchain.tools import tool
 
 try:
-    from faiss_search.search import hybrid_search
+    from .faiss_search.search import hybrid_search
 except:
     from agents.tools.faiss_search.search import hybrid_search
 # Load DHIS2 credentials from env
@@ -195,7 +195,7 @@ def get_all(
     key: str,
     fields: str = "id,name",
     filters: Optional[Dict[str, str]] = None,
-    page_size: int = 600
+    page_size: int = 1000
 ) -> List[Dict[str, Any]]:
     page = 1
     all_items = []
@@ -206,7 +206,7 @@ def get_all(
             "pageSize": page_size,
             "fields": fields
         }
-
+        print(filters)
         if filters:
             for field, condition in filters.items():
                 params.setdefault("filter", []).append(f"{field}:{condition}")
@@ -307,6 +307,7 @@ def get_organisation_units(filters: Optional[Dict[str, str]] = None) -> List[Dic
         filters: Optional dict of DHIS2 filter expressions.
                  Example: {"level": "eq:2", "name": "ilike:Sierra"}
     """
+
     return get_all(
         endpoint="organisationUnits.json",
         key="organisationUnits",
@@ -336,8 +337,8 @@ def get_data_elements(filters: Optional[Dict[str, str]] = None) -> List[Dict[str
 # units = get_organisation_units.invoke({"level": "eq:2"})
 # print(units)
 
-# # Get org units whose name includes "District"
-# units = get_organisation_units({"name": "ilike:District"})
+# Get org units whose name includes "District"
+# units = get_organisation_units({"name": "ilike:Andulo"})
 # print(units)
 #
 # # Get all children of a specific parent

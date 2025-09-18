@@ -281,7 +281,7 @@ def render_chart_chartjs(filtered_df: pd.DataFrame, selected_indicators: list, c
     chart_json = json.dumps(chart_config)
 
     # Encode CSV data as base64 for safe injection
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    csv_bytes = this_df.to_csv(index=False).encode("utf-8")
     csv_b64 = base64.b64encode(csv_bytes).decode("utf-8")
 
     html_code = f"""
@@ -906,6 +906,12 @@ if page == "Main Chat":
             else:
                 st.session_state.result = result
                 st.session_state.show_chart = True
+                output = result.get("output")
+
+                assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+                st.session_state.messages.append(assistant_msg)
+                with st.chat_message("assistant"):
+                    st.markdown(assistant_msg.content)
 
         elif route == "data_entry":
             # Append a strong reminder to the last user message in state before invoking the executor
@@ -941,8 +947,10 @@ if page == "Main Chat":
             with st.chat_message("assistant"):
                 st.markdown(assistant_msg.content)
 
-        if st.session_state.get("show_chart", False):
-            chart_data(st.session_state.result, "chartjs")
+    if st.session_state.get("show_chart", False):
+        # print(f"The show_chart {st.session_state.get("show_chart")}")
+        st.info(f"The show_chart {st.session_state.get("show_chart")}")
+        chart_data(st.session_state.result, "chartjs")
 
     # Show metadata options after user prompt
     if st.session_state.get("show_suggestion_options", False):

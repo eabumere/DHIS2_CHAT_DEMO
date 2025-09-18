@@ -1,3 +1,5 @@
+# %pip install -U langchain langchain_openai langsmith pandas langchain_experimental matplotlib langgraph langchain_core
+
 https://www.youtube.com/watch?v=jYY24eNTYNg
 streamlit run app.py
 
