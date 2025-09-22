@@ -1,6 +1,6 @@
 # utils/llm.py
 
-from langchain_community.chat_models import AzureChatOpenAI
+from langchain_openai import AzureChatOpenAI
 import os
 from dotenv import load_dotenv
 

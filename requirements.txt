@@ -1,8 +1,45 @@
-streamlit>=1.31.0
-langchain>=0.1.0
-langchain-community>=0.0.10
-langgraph>=0.0.10
-python-dotenv>=1.0.0
-requests>=2.31.0 
-langchain-weaviate>=0.0.1
-weaviate-client>=4.5.4 
+# Core LangChain stack
+langchain==0.3.25
+langchain-community==0.3.24
+langchain-openai
+langchain_experimental
+
+# LangSmith: must be <0.4 to satisfy langchain & community
+langsmith>=0.1.125,<0.4.0
+
+# LangGraph: for multi-agent workflows
+langgraph==0.6.7
+
+# Azure
+azure-core
+azure-storage-blob
+azure-ai-openai
+azure-ai-documentintelligence
+
+# Streamlit and its protobuf constraint
+streamlit==1.45.1
+protobuf>=3.20,<5
+
+# Optional but often needed
+numpy>=2.1.0        # required if Python >= 3.13
+pydantic>=2.0,<3.0  # LangChain ecosystem depends on Pydantic v2
+
+# Environment variables
+python-dotenv
+
+# HTTP requests
+requests
+
+faiss-gpu
+matplotlib
+plotly
+fuzzysearch
+faiss-cpu
+faiss-gpu
+pdfplumber
+docx2txt
+python-pptx
+PyPDF2
+# Weaviate integration
+langchain-weaviate
+weaviate-client

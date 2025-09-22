@@ -201,14 +201,28 @@ openai_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 # --- Agent Node ---
 def agent_node(state: AgentState) -> AgentState:
     try:
-        result = openai_executor.invoke(state)  # Pass full state with all messages
-        # print(result)
-        return {"messages": result["messages"], "output": result["output"]}  # Ensure state gets updated
+        result = openai_executor.invoke(state)  # Run agent
+        return {
+            "messages": result["messages"],
+            "output": result["output"]
+        }
     except Exception as e:
-        error_message = f"❌ Error: {str(e)}"
-        messages = state["messages"] + [AIMessage(content=error_message)]
-        output = state["output"]
-        return {"messages": messages, "output": output}
+        # Log full error for debugging
+        print(f"❌ Error: {str(e)}")
+
+        # Friendly message for UI
+        if "token" in str(e).lower() or "rate limit" in str(e).lower():
+            user_friendly_message = "❌ The system is currently overloaded (token limit exceeded). Please wait and try again, or contact your administrator."
+        else:
+            user_friendly_message = "❌ An unexpected error occurred. Please contact your administrator."
+
+        # Append the friendly error message to chat history
+        messages = state.get("messages", []) + [AIMessage(content=user_friendly_message)]
+
+        return {
+            "messages": messages,
+            "output": AIMessage(content=user_friendly_message)
+        }
 
 # --- Graph ---
 graph = StateGraph(AgentState)

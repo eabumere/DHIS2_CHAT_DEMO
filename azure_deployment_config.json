@@ -1,0 +1,181 @@
+{
+  "azure_resources": {
+    "document_intelligence": {
+      "name": "dhis2-document-intelligence",
+      "sku": "S0",
+      "location": "East US",
+      "features": [
+        "custom_models",
+        "layout_analysis",
+        "handwriting_recognition"
+      ]
+    },
+    "storage_account": {
+      "name": "dhis2documents",
+      "sku": "Standard_LRS",
+      "location": "East US",
+      "containers": [
+        "dhis2-documents",
+        "training-data",
+        "processed-documents"
+      ]
+    },
+    "function_app": {
+      "name": "dhis2-document-processor",
+      "runtime": "python",
+      "version": "3.11",
+      "location": "East US",
+      "app_service_plan": {
+        "name": "dhis2-processor-plan",
+        "sku": "B1"
+      }
+    },
+    "key_vault": {
+      "name": "dhis2-secrets",
+      "location": "East US",
+      "secrets": [
+        "AZURE_FORM_RECOGNIZER_ENDPOINT",
+        "AZURE_FORM_RECOGNIZER_KEY",
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DHIS2_BASE_URL",
+        "DHIS2_USERNAME",
+        "DHIS2_PASSWORD"
+      ]
+    }
+  },
+  "environment_variables": {
+    "AZURE_FORM_RECOGNIZER_ENDPOINT": "https://dhis2-document-intelligence.cognitiveservices.azure.com/",
+    "AZURE_STORAGE_CONTAINER": "dhis2-documents",
+    "AZURE_FUNCTION_TIMEOUT": "300",
+    "AZURE_FUNCTION_MEMORY": "1024"
+  },
+  "dhis2_mapping_config": {
+    "facility_register": {
+      "anc_visits": "dataElement",
+      "malaria_cases": "dataElement",
+      "immunization_count": "dataElement",
+      "facility_name": "orgUnit",
+      "month": "period",
+      "year": "period",
+      "patient_count": "value",
+      "category": "categoryOptionCombo",
+      "attribute": "attributeOptionCombo"
+    },
+    "patient_register": {
+      "patient_id": "dataElement",
+      "facility": "orgUnit",
+      "visit_date": "period",
+      "diagnosis": "dataElement",
+      "treatment": "dataElement",
+      "outcome": "categoryOptionCombo"
+    }
+  },
+  "custom_model_training": {
+    "facility_register_model": {
+      "model_id": "facility-register-v1",
+      "description": "Custom model for facility register processing",
+      "training_data_requirements": {
+        "minimum_samples": 5,
+        "recommended_samples": 15,
+        "sample_types": [
+          "empty_register",
+          "filled_register",
+          "handwritten_entries",
+          "printed_entries"
+        ]
+      },
+      "field_mappings": {
+        "facility_name": "orgUnit",
+        "reporting_period": "period",
+        "anc_visits": "dataElement",
+        "patient_count": "value"
+      }
+    }
+  },
+  "deployment_steps": [
+    {
+      "step": 1,
+      "action": "Create Azure Document Intelligence resource",
+      "description": "Set up Document Intelligence service for custom model training"
+    },
+    {
+      "step": 2,
+      "action": "Create Azure Storage Account",
+      "description": "Set up blob storage for document uploads and training data"
+    },
+    {
+      "step": 3,
+      "action": "Create Azure Key Vault",
+      "description": "Store sensitive configuration and credentials securely"
+    },
+    {
+      "step": 4,
+      "action": "Deploy Azure Function",
+      "description": "Deploy the document processing function with proper configuration"
+    },
+    {
+      "step": 5,
+      "action": "Train Custom Model",
+      "description": "Upload training data and train the facility register model"
+    },
+    {
+      "step": 6,
+      "action": "Configure DHIS2 Integration",
+      "description": "Set up DHIS2 API credentials and mapping configuration"
+    },
+    {
+      "step": 7,
+      "action": "Test End-to-End Flow",
+      "description": "Test the complete document processing pipeline"
+    }
+  ],
+  "monitoring": {
+    "application_insights": {
+      "name": "dhis2-document-monitoring",
+      "location": "East US",
+      "features": [
+        "performance_monitoring",
+        "error_tracking",
+        "custom_metrics",
+        "log_analytics"
+      ]
+    },
+    "alerts": [
+      {
+        "name": "document_processing_failures",
+        "condition": "Function execution failures > 5 in 5 minutes",
+        "action": "email_alert"
+      },
+      {
+        "name": "dhis2_submission_failures",
+        "condition": "DHIS2 API errors > 3 in 10 minutes",
+        "action": "email_alert"
+      }
+    ]
+  },
+  "cost_optimization": {
+    "document_intelligence": {
+      "tier": "S0",
+      "estimated_cost": "$50-100/month",
+      "usage_limits": {
+        "transactions_per_month": 5000,
+        "custom_models": 10
+      }
+    },
+    "storage": {
+      "tier": "Standard_LRS",
+      "estimated_cost": "$5-20/month",
+      "usage_limits": {
+        "storage_gb": 100
+      }
+    },
+    "function_app": {
+      "tier": "Consumption",
+      "estimated_cost": "$10-30/month",
+      "usage_limits": {
+        "executions_per_month": 1000000,
+        "execution_time": "10 minutes"
+      }
+    }
+  }
+} 

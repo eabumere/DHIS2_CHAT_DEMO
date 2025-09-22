@@ -33,6 +33,8 @@ def fetch_metadata():
         while True:
             if endpoint == 'organisationUnits.json':
                 url = f"{DHIS2_BASE_URL}/api/{endpoint}?page={page}&pageSize={page_size}&fields=id,code,name,parent,children,level,path,ancestors"
+            elif endpoint == 'dataElements.json':
+                url = f"{DHIS2_BASE_URL}/api/{endpoint}?page={page}&pageSize={page_size}&fields=id,name,description,shortName,categoryCombo[id,name,categories[id,name,categoryOptions[id,name]]]"
             else:
                 url = f"{DHIS2_BASE_URL}/api/{endpoint}?page={page}&pageSize={page_size}&fields=*"
             response = requests.get(url, auth=(DHIS2_USERNAME, DHIS2_PASSWORD))
@@ -60,25 +62,41 @@ def fetch_metadata():
     # org_units_fetched = get_all("organisationUnits.json", "organisationUnits")
     # print(org_units_fetched)
 
-    return data_elements_fetched, indicators_fetched, program_indicators_fetched #org_units_fetched
+    return data_elements_fetched, indicators_fetched, program_indicators_fetched  #org_units_fetched
 
 
-def build_documents(data_elements_, indicators_, program_indicators_):
+from langchain_core.documents import Document
+
+def build_documents(
+    data_elements_: list,
+    indicators_: list,
+    program_indicators_: list
+):
     '''
-    content is what gets embedded and determines semantic similarity.
-    :param data_elements_: list of data elements
-    :param indicators_: list of indicators
-    :param program_indicators_: list of program indicators
-    :return: list of documents
+    Build document representations of DHIS2 metadata for semantic search.
+    Each document includes relevant content and metadata.
+
+    :param data_elements_: List of data elements
+    :param indicators_: List of indicators
+    :param program_indicators_: List of program indicators
+    :return: List of Document objects
     '''
     docs_ = []
-    print(f"Count of Data Element  => {len(data_elements_)}")
 
+    print(f"Count of Data Elements  => {len(data_elements_)}")
     for de in data_elements_:
-        content = f"{de['displayName']} - {de.get('description', '')}"
+        content = f"{de.get('description', '')} - {de["name"]}"
         docs_.append(Document(
             page_content=content,
-            metadata={"id": de["id"], "name": de["displayName"], "type": "dataElement"}
+            metadata={
+                "id": de["id"],
+                "name": de["name"],
+                "shortName": de["shortName"],
+                "description": de.get('description', ''),
+                "categoryCombo": de.get("categoryCombo", {}),
+                "categories": de.get("categoryCombo", {}).get("categories", {}),
+                "type": "dataElement"
+            }
         ))
 
     print(f"Count of Indicators  => {len(indicators_)}")
@@ -86,11 +104,13 @@ def build_documents(data_elements_, indicators_, program_indicators_):
         content = f"{ind['displayName']} - {ind.get('description', '')}"
         docs_.append(Document(
             page_content=content,
-            metadata={"id": ind["id"],
-                      "name": ind["displayName"],
-                      "numerator": ind["numerator"],
-                      "denominator": ind["denominator"],
-                      "type": "indicator"}
+            metadata={
+                "id": ind["id"],
+                "name": ind["displayName"],
+                "numerator": ind.get("numerator", ""),
+                "denominator": ind.get("denominator", ""),
+                "type": "indicator"
+            }
         ))
 
     print(f"Count of Program Indicators  => {len(program_indicators_)}")
@@ -98,35 +118,14 @@ def build_documents(data_elements_, indicators_, program_indicators_):
         content = f"{ind['displayName']} - {ind.get('description', '')}"
         docs_.append(Document(
             page_content=content,
-            metadata=
-                    {
-                        "id": ind["id"],
-                        "name": ind["displayName"],
-                        "type": "programIndicator"
-                    }
+            metadata={
+                "id": ind["id"],
+                "name": ind["displayName"],
+                "type": "programIndicator"
+            }
         ))
-
-    # print(f"Count of Organization Unit  => {len(org_unit_)}")
-    # for orgUnit in org_unit_:
-    #     content = f"Name: {orgUnit['name']} | Code: {orgUnit.get('code', '')} | ID: {orgUnit['id']} | Path: {orgUnit.get('path', '')}"
-    #     docs_.append(Document(
-    #         page_content=content,
-    #         metadata=
-    #                 {
-    #                     "id": orgUnit["id"],
-    #                     "code": orgUnit.get('code', ''),
-    #                     "name": orgUnit["name"],
-    #                     "parent": orgUnit.get('parent', ''),
-    #                     "children": orgUnit.get('children', ''),
-    #                     "level": orgUnit["level"],
-    #                     "path": orgUnit.get('path', ''),
-    #                     "ancestors": orgUnit.get('ancestors', ''),
-    #                     "organisationUnitGroups": orgUnit.get('organisationUnitGroups', ''),
-    #                     "type": "organisationUnit"
-    #                 }
-    #         ))
-    #
     return docs_
+
 
 def embed_and_save_index(docs, save_path="index/"):
     print(f"📦 Embedding {len(docs)} documents...")
@@ -134,7 +133,8 @@ def embed_and_save_index(docs, save_path="index/"):
     vectorstore.save_local(save_path)
     print(f"✅ FAISS index saved to '{save_path}'")
 
-if __name__ == "__main__":
+
+def run_embedding():
     # data_elements, indicators, program_indicators, organisationUnits = fetch_metadata()
     data_elements, indicators, program_indicators = fetch_metadata()
 
@@ -142,3 +142,6 @@ if __name__ == "__main__":
     docs = build_documents(data_elements, indicators, program_indicators)
 
     embed_and_save_index(docs)
+
+if __name__ == "__main__":
+    run_embedding()

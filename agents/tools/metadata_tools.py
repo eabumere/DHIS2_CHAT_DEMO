@@ -10,7 +10,8 @@ from re_order import reorder_dhis2_metadata_fixed
 from .schema import get_required_fields_for_schema
 import random
 import string
-
+from langchain_core.tools import tool
+from langchain_core.messages import ToolMessage
 # Load .env credentials
 load_dotenv()
 base_url = os.getenv("DHIS2_BASE_URL")
@@ -22,30 +23,61 @@ SCHEMA_DIR = Path(__file__).parent.parent / "schema"
 def generate_suffix(length=4):
     return '_' + ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
+
+from typing import Optional, List, Dict
+import requests
+
+
 @tool
-def get_dhis2_metadata(metadata_type: str, params: Optional[dict] = None) -> str:
-    """Retrieve metadata from a DHIS2 instance using specified filters or identifiers."""
+def get_dhis2_metadata(
+        metadata_type: str,
+        params: Optional[dict] = None,
+        page_size: int = 500
+) -> List[Dict]:
+    """
+    Retrieve ALL pages of metadata from a DHIS2 instance.
+
+    :param metadata_type: e.g. "dataElements", "indicators", etc.
+    :param params: any additional filters (will be merged with paging params)
+    :param page_size: number of records per page
+    :return: List of metadata items (each is a dict)
+    """
     if not all([base_url, username, password]):
-        return "❌ Missing DHIS2 credentials"
-    url = f"{base_url}/api/{metadata_type}.json?fields=*"
-    try:
-        response = requests.get(url, auth=(username, password), params=params)
-        response.raise_for_status()
-        data = response.json()
+        raise RuntimeError("❌ Missing DHIS2 credentials")
+
+    # start with a fresh params dict
+    params = params.copy() if params else {}
+
+    # only set fields if caller hasn't already
+    params.setdefault("fields", "id,name")
+    params.update({
+        "pageSize": page_size,
+        "page": 1,
+    })
+
+    all_items = []
+
+    while True:
+        url = f"{base_url}/api/{metadata_type}.json"
+        resp = requests.get(url, auth=(username, password), params=params)
+        resp.raise_for_status()
+
+        data = resp.json()
         items = data.get(metadata_type, [])
-        print(items)
+        all_items.extend(items)
+
         pager = data.get("pager", {})
         current_page = pager.get("page", 1)
         total_pages = pager.get("pageCount", 1)
-        names = "\n".join(
-            f"{item.get('displayName', item.get('name', 'N/A'))} - ID: {item.get('id')}"
-            for item in items
-        )
-        print('name -', names)
-        # return f"{names}\n\nThis is page {current_page} of {total_pages}."
-        return items
-    except requests.exceptions.RequestException as e:
-        return f"❌ Request error: {str(e)}"
+
+        if current_page >= total_pages:
+            break
+
+        params["page"] = current_page + 1
+
+    return all_items
+
+
 
 @tool
 def generate_dhis2_ids(count: int = 1) -> str:
@@ -149,36 +181,60 @@ def get_schema_with_retry(schema_name: str, max_retries: int = 3, backoff_factor
 
 def post_dhis2_api(endpoint: str, payload: dict, params: Optional[dict] = None) -> dict:
     url = f"{base_url}/api/metadata"
+    response = None
     try:
         response = requests.post(url, auth=(username, password), json=payload, params=params)
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.HTTPError as http_err:
+        return {
+            "status": "error",
+            "message": str(http_err),
+            "response": response.text
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
 def read_response(response_json):
-    print(response_json)
-    type_reports = response_json.get("response", {}).get("typeReports", [])
+    # If it's a string, try to parse it into a dict
+    if isinstance(response_json, str):
+        response_json = json.loads(response_json)
+
+    try:
+        type_reports = response_json.get("response", {}).get("typeReports", [])
+    except:
+        response_json = json.loads(response_json.get("response", {}))
+        type_reports = response_json.get("response", {}).get("typeReports", [])
+
     created_items = []
     updated_items = []
     deleted_items = []
-
+    ignored_items = []
+    error_items = []
     for report in type_reports:
         klass = report.get("klass", "Unknown")
         # Strip "org.hisp.dhis." prefix
         friendly_name = klass.split('.')[-1]
         stats = report.get("stats", {})
+        object_reports = report.get("objectReports", [])
+        print(" ==== object_reports ====")
+        print(object_reports)
+        error_reports = object_reports[0].get("errorReports", [])
         created = stats.get("created", 0)
         updated = stats.get("updated", 0)
         deleted = stats.get("deleted", 0)
-
+        ignored = stats.get("ignored", 0)
+        if len(error_reports) > 0:
+            error_items.append(f"Error: {error_reports[0]}")
         if created:
             created_items.append(f"{created} {friendly_name}")
         if updated:
             updated_items.append(f"{updated} {friendly_name}")
         if deleted:
             deleted_items.append(f"{deleted} {friendly_name}")
+        if ignored:
+            ignored_items.append(f"{ignored} {friendly_name}")
 
     message_parts = []
     if created_items:
@@ -186,7 +242,11 @@ def read_response(response_json):
     if updated_items:
         message_parts.append("Updated: " + ", ".join(updated_items))
     if deleted_items:
-        message_parts.append("Updated: " + ", ".join(deleted_items))
+        message_parts.append("deleted: " + ", ".join(deleted_items))
+    if ignored_items:
+        message_parts.append("Ignored: " + ", ".join(ignored_items))
+    if error_items:
+        message_parts.append("Ignored: " + ", ".join(error_items))
 
     message = "; ".join(message_parts) if message_parts else "No changes made."
 
@@ -195,6 +255,8 @@ def read_response(response_json):
         "createdItems": created_items,
         "updatedItems": updated_items,
         "deletedItems": deleted_items,
+        "ignoredItems": ignored_items,
+        "error_items": error_items,
         "message": message
     }, indent=2)
 
@@ -223,7 +285,7 @@ def validate_payload_against_schema(payload: dict, schema: dict) -> None:
 def apply_defaults(item: dict, schema: dict):
     """Recursively apply defaults and DHIS2-specific fallback defaults."""
     required = schema.get("required", [])
-    print(required)
+    # print(required)
     properties = schema.get("properties", {})
     for field in required:
         if field not in item:
@@ -299,9 +361,6 @@ def create_metadata(input_str: str) -> str:
         }, indent=2)
 
 
-from langchain_core.tools import tool
-from langchain_core.messages import ToolMessage
-
 @tool
 def delete_metadata(endpoint: str, names: List[str]) -> ToolMessage:
     """Delete metadata objects by name. Resolves names to UIDs before deletion."""
@@ -318,8 +377,13 @@ def delete_metadata(endpoint: str, names: List[str]) -> ToolMessage:
 
         # Step 2: Match names to UIDs
         name_to_id = {item["name"]: item["id"] for item in items}
-        missing_names = [name for name in names if name not in name_to_id]
-        matched_ids = [name_to_id[name] for name in names if name in name_to_id]
+
+        # Lowercase the keys of name_to_id for comparison
+        lower_name_to_id = {k.lower(): v for k, v in name_to_id.items()}
+
+        # Match using lowercase names
+        missing_names = [name for name in names if name.lower() not in lower_name_to_id]
+        matched_ids = [lower_name_to_id[name.lower()] for name in names if name.lower() in lower_name_to_id]
 
         if not matched_ids:
             return ToolMessage(
@@ -331,7 +395,6 @@ def delete_metadata(endpoint: str, names: List[str]) -> ToolMessage:
         payload = [{"id": uid} for uid in matched_ids]
         wrapped_payload = {endpoint: payload}
         response_json = post_dhis2_api(endpoint, wrapped_payload, params={"importStrategy": "DELETE"})
-
         msg = read_response(response_json)  # Use your formatting here
         if missing_names:
             msg += f"\n⚠️ Not found: {', '.join(missing_names)}"
