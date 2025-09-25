@@ -1,3 +1,4 @@
+#App.py
 import streamlit as st
 import pandas as pd
 import json
@@ -11,11 +12,9 @@ from fuzzysearch import find_near_matches
 import requests
 from dotenv import load_dotenv
 from PIL import Image
-import pdfplumber
 import docx2txt
 import tempfile
 from pptx import Presentation
-from io import BytesIO
 from multi_agent import (
     metadata_agent_executor,
     analytics_executor,
@@ -25,6 +24,13 @@ from multi_agent import (
     # azure_document_intelligence_executor,
     routing_decision
 )
+# --- Import agent executors ---
+# from agents.metadata_agent import metadata_agent_executor
+# from agents.analytics_agent import analytics_executor
+# from agents.tracker_data_agent import tracker_data_executor
+# from agents.event_data_agent import event_data_executor
+# from agents.data_entry_agent import data_entry_executor
+
 from agents.tools.faiss_search.embed_dhis2_faiss_metadata import run_embedding
 from agents.tools.analytics_tools import get_all
 
@@ -522,6 +528,62 @@ def chart_data(result_, chart_backend):
     else:
         st.warning("No valid data or required columns missing.")
 
+def handle_routing_clarification(router_result: str, state_: dict) -> str:
+    """
+    Streamlit helper to handle routing decisions.
+
+    Args:
+        router_result (str): Output from `routing_decision`.
+        state_ (dict): Your agent state, used to persist last_active_agent.
+
+    Returns:
+        str: The final agent to route to.
+    """
+    if router_result != "clarify_agent":
+        return router_result  # normal routing
+
+    st.warning("I’m not sure which agent should handle your request. Please choose:")
+
+    # Agent options
+    agent_options = {
+        "metadata": "Metadata Agent",
+        "analytics": "Analytics Agent",
+        "data_entry": "Data Entry Agent",
+        "event_data": "Event Data Agent",
+        "tracker_data": "Tracker Data Agent"
+    }
+
+    # Display buttons in Streamlit
+    col1_, col2_, col3 = st.columns(3)
+    selected_agent = None
+    for idx, (agent_id, label_) in enumerate(agent_options.items()):
+        col = [col1, col2, col3][idx % 3]
+        if col.button(label_):
+            selected_agent = agent_id
+            state_["last_active_agent"] = agent_id  # persist choice
+            st.success(f"Routing to: {label_}")
+
+    # If user hasn’t picked yet, return None
+    if selected_agent:
+        return selected_agent
+    return "clarify_agent"  # still waiting for user input
+
+def handle_suggestion_tool_result(result_):
+    suggestion_tool_result_ = result_.get("suggestion_tool_result", "")
+    print(f"suggestion_tool_result => {suggestion_tool_result_}")
+
+    if suggestion_tool_result_ and suggestion_tool_result_.get("status") == "multiple_matches":
+        suggestions = suggestion_tool_result_["suggestions"]
+
+        # Keep unresolved suggestions in a queue
+        if "unresolved_metadata" not in st.session_state:
+            st.session_state.unresolved_metadata = []
+
+        st.session_state.unresolved_metadata.append(suggestion_tool_result_)
+        st.session_state.show_suggestion_options_data = True
+        return True
+
+    return False
 
 # ========== App UI ==========
 
@@ -840,8 +902,11 @@ if page == "Main Chat":
     if "show_chart" not in st.session_state:
         st.session_state.show_chart = False
 
-    if "show_suggestion_options" not in st.session_state:
-        st.session_state.show_suggestion_options = False
+    if "show_suggestion_options_metadata" not in st.session_state:
+        st.session_state.show_suggestion_options_metadata = False
+
+    if "show_suggestion_options_data" not in st.session_state:
+        st.session_state.show_suggestion_options_data = False
 
     for msg in st.session_state.messages:
         role = "assistant" if isinstance(msg, AIMessage) else "user"
@@ -890,62 +955,89 @@ if page == "Main Chat":
 
             }
         route = routing_decision(state)
+        # 2. Handle possible clarification
+        final_agent = handle_routing_clarification(route, state)
 
-        if route == "metadata":
-            result = metadata_agent_executor.invoke(state)
-        elif route == "analytics":
-            result = analytics_executor.invoke(state)
-            metadata_result = result.get("metadata_result", "")
+        # 3. Only continue if final_agent is determined
+        if final_agent != "clarify_agent":
 
-            if metadata_result and metadata_result.get("status") == "multiple_matches":
-                suggestions = metadata_result["suggestions"]
-                st.session_state.suggestions = suggestions
-                st.session_state.show_suggestion_options = True
+            if route == "metadata":
+                result = metadata_agent_executor.invoke(state)
+            elif route == "analytics":
+                result = analytics_executor.invoke(state)
+                metadata_result = result.get("metadata_result", "")
+
+                if metadata_result and metadata_result.get("status") == "multiple_matches":
+                    suggestions = metadata_result["suggestions"]
+                    st.session_state.suggestions = suggestions
+                    st.session_state.show_suggestion_options_metadata = True
 
 
+                else:
+                    st.session_state.result = result
+                    st.session_state.show_chart = True
+                    output = result.get("output")
+
+                    assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+                    st.session_state.messages.append(assistant_msg)
+                    with st.chat_message("assistant"):
+                        st.markdown(assistant_msg.content)
+
+            elif route == "data_entry":
+                # Append a strong reminder to the last user message in state before invoking the executor
+                # Find the last human message in the conversation history
+                # for msg in reversed(state["messages"]):
+                #     if isinstance(msg, HumanMessage):
+                #         # Append the reminder to the last human message's content
+                #         msg.content += (
+                #             "\n\nIMPORTANT: You must call the tool `submit_aggregate_data` "
+                #             "whenever performing any data submission, update, or deletion. "
+                #             "Do not simulate or fake tool calls under any circumstances."
+                #         )
+                #         break  # Only append once to the most recent human message
+                if "raw_data_df_uploaded" not in st.session_state:
+                    st.session_state.file_uploaded = False
+                else:
+                    st.session_state.file_uploaded = True
+                result = data_entry_executor.invoke(state)
+
+                suggestion_tool_result = result.get("suggestion_tool_result", "")
+                print(f"suggestion_tool_result 1 => {suggestion_tool_result}")
+
+                if suggestion_tool_result and suggestion_tool_result.get("status") == "multiple_matches":
+                    suggestions = suggestion_tool_result["suggestions"]
+                    st.session_state.suggestions = suggestions
+                    st.session_state.show_suggestion_options_data = True
+
+
+                else:
+                    st.session_state.result = result
+                    output = result.get("output")
+                    assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+                    st.session_state.messages.append(assistant_msg)
+                    with st.chat_message("assistant"):
+                        st.markdown(assistant_msg.content)
+
+
+            elif route == "event_data":
+                result = event_data_executor.invoke(state)
+            elif route == "tracker_data":
+                result = tracker_data_executor.invoke(state)
+                # print(result)
+            # elif route == "azure_document_intelligence":
+            #     result = azure_document_intelligence_executor.invoke(state)
             else:
-                st.session_state.result = result
-                st.session_state.show_chart = True
-                output = result.get("output")
+                error_msg = AIMessage(content="❌ Unknown routing decision.")
+                st.session_state.messages.append(error_msg)
+                st.chat_message("assistant").markdown(error_msg.content)
+                st.stop()
 
+            if len(st.session_state.suggestions) < 1:
+                output = result.get("output")
                 assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
                 st.session_state.messages.append(assistant_msg)
                 with st.chat_message("assistant"):
                     st.markdown(assistant_msg.content)
-
-        elif route == "data_entry":
-            # Append a strong reminder to the last user message in state before invoking the executor
-            # Find the last human message in the conversation history
-            for msg in reversed(state["messages"]):
-                if isinstance(msg, HumanMessage):
-                    # Append the reminder to the last human message's content
-                    msg.content += (
-                        "\n\nIMPORTANT: You must call the tool `submit_aggregate_data` "
-                        "whenever performing any data submission, update, or deletion. "
-                        "Do not simulate or fake tool calls under any circumstances."
-                    )
-                    break  # Only append once to the most recent human message
-
-            result = data_entry_executor.invoke(state)
-        elif route == "event_data":
-            result = event_data_executor.invoke(state)
-        elif route == "tracker_data":
-            result = tracker_data_executor.invoke(state)
-            # print(result)
-        # elif route == "azure_document_intelligence":
-        #     result = azure_document_intelligence_executor.invoke(state)
-        else:
-            error_msg = AIMessage(content="❌ Unknown routing decision.")
-            st.session_state.messages.append(error_msg)
-            st.chat_message("assistant").markdown(error_msg.content)
-            st.stop()
-
-        if len(st.session_state.suggestions) < 1:
-            output = result.get("output")
-            assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
-            st.session_state.messages.append(assistant_msg)
-            with st.chat_message("assistant"):
-                st.markdown(assistant_msg.content)
 
     if st.session_state.get("show_chart", False):
         # print(f"The show_chart {st.session_state.get("show_chart")}")
@@ -953,7 +1045,7 @@ if page == "Main Chat":
         chart_data(st.session_state.result, "chartjs")
 
     # Show metadata options after user prompt
-    if st.session_state.get("show_suggestion_options", False):
+    if st.session_state.get("show_suggestion_options_metadata", False):
         with st.chat_message("assistant"):
             st.markdown("There are multiple metadata matches. Please choose one:")
 
@@ -962,8 +1054,82 @@ if page == "Main Chat":
                 if st.button(label, key=f"metadata_option_{i}"):
                     st.session_state.selected_metadata = option  # Store full dict (id, name, doc_type, score)
                     st.session_state.trigger_metadata_retry = True  # 🔁 trigger new processing
-                    st.session_state.show_suggestion_options = False
+                    st.session_state.show_suggestion_options_metadata = False
                     st.rerun()
+
+    # Show metadata options after user prompt
+    if st.session_state.get("show_suggestion_options_data", False):
+        with st.chat_message("assistant"):
+            st.markdown("There are multiple metadata matches for data processing. Please choose one:")
+
+            for i, option in enumerate(st.session_state.suggestions):
+                label = f"{option['name']} ({option['doc_type']})"
+                if st.button(label, key=f"data_entry_option_{i}"):
+                    st.session_state.selected_metadata = option  # Store full dict (id, name, doc_type, score)
+                    st.session_state.trigger_data_retry = True  # 🔁 trigger new processing
+                    st.session_state.show_suggestion_options_data = False
+                    st.rerun()
+
+
+    if st.session_state.get("trigger_data_retry"):
+        selected = st.session_state.selected_metadata
+
+        # Reconstruct the last actual user question
+        original_user_msg = ""
+        for msg in reversed(st.session_state.messages):
+            if isinstance(msg, HumanMessage):
+                original_user_msg = msg.content
+                break
+
+        # Build a clearer retry message with metadata reference
+        augmented_msg = HumanMessage(
+            # content=f"{original_user_msg} (selected: {selected['id']} - {selected['name']})"
+            content=f"{selected['doc_type']} selected:  {selected['name']} -  {selected['id']})"
+
+        )
+
+        st.session_state.messages.append(augmented_msg)
+
+        with st.chat_message("user"):
+            st.markdown(original_user_msg)  # ✅ Show only original question in UI
+
+        # Re-invoke agent
+        state = {"messages": st.session_state.messages}
+        result = data_entry_executor.invoke(state)
+
+        suggestion_tool_result = result.get("suggestion_tool_result", "")
+        print(f"suggestion_tool_result 1 => {suggestion_tool_result}")
+
+        if suggestion_tool_result and suggestion_tool_result.get("status") == "multiple_matches":
+            suggestions = suggestion_tool_result["suggestions"]
+            st.session_state.suggestions = suggestions
+            st.session_state.show_suggestion_options_data = True
+
+
+        else:
+            st.session_state.result = result
+            output = result.get("output")
+            assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+            st.session_state.messages.append(assistant_msg)
+            with st.chat_message("assistant"):
+                st.markdown(assistant_msg.content)
+
+
+
+
+
+
+        st.session_state.result = result
+        st.session_state.trigger_data_retry = False
+
+        # output = result.get("output")
+        # assistant_msg = output if isinstance(output, AIMessage) else AIMessage(content=str(output))
+        # st.session_state.messages.append(assistant_msg)
+        #
+        # with st.chat_message("assistant"):
+        #     st.markdown(assistant_msg.content)
+
+        st.rerun()  # ✅ Force chart to render
 
     if st.session_state.get("trigger_metadata_retry"):
         selected = st.session_state.selected_metadata
@@ -1003,5 +1169,6 @@ if page == "Main Chat":
             st.markdown(assistant_msg.content)
 
         st.rerun()  # ✅ Force chart to render
+
 
 

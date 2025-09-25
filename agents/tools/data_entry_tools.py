@@ -9,11 +9,16 @@ from pydantic import BaseModel, Field
 import pandas as pd
 import streamlit as st
 from fuzzysearch import find_near_matches
+from .faiss_search.search import hybrid_search
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 import pandas as pd
 from io import StringIO
 import re
+from typing import Dict, Any
+import asyncio
 from utils.llm import get_llm
+FAISS_THRESHOLD = 0.2
+# FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", 0.5))
 
 llm = get_llm()
 load_dotenv()
@@ -179,6 +184,137 @@ class SubmitPayload(BaseModel):
         )
     )
 
+@tool
+def search_metadata(query: str, metadata: str) -> Dict[str, Any]:
+    """
+    Searches metadata using vector similarity based on the query string.
+    Returns either a single match or a list of high-confidence options for user selection.
+    """
+    print(f"Searching started for {query}")
+    try:
+        # docs_and_scores: List[Document] = vectorstore.similarity_search_with_score(query, k=5)
+        filtered_matches = hybrid_search(query, FAISS_THRESHOLD, coc_metadata=metadata)
+        if not filtered_matches:
+            return {
+                "status": "no_match",
+                "message": f"No indicator match found with score ≤ {FAISS_THRESHOLD}.",
+                "suggestions": []
+            }
+
+        if len(filtered_matches) == 1:
+            return {
+                "status": "auto_selected",
+                "selected": filtered_matches[0]
+            }
+
+        return {
+            "status": "multiple_matches",
+            "suggestions": filtered_matches
+        }
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@tool
+def submit_aggregate_data_from_text(
+    parsed_payload: Dict[str, Any],
+    preview_only: bool = True,
+    operation: str = "SUBMIT"
+) -> Dict[str, Any]:
+    """
+    Submit, update, or delete aggregate data in DHIS2 from a parsed natural language payload.
+
+    Args:
+        parsed_payload (dict): Must include resolved IDs for:
+            {{
+              "dataElement": "<RESOLVED ID>",
+              "orgUnit": "<RESOLVED ID>",
+              "period": "YYYYMM",
+              "categoryOptionCombos": "<RESOLVED ID>",
+              "attributeOptionCombos": "<RESOLVED ID>",
+              "value": number
+            }}
+        preview_only (bool): If True, preview the parsed data without committing.
+        params: Operation type: 'CREATE_AND_UPDATE' or 'DELETE'.
+        operation (str): One of ["SUBMIT", "UPDATE", "DELETE"].
+
+    Returns:
+        dict: Preview or final confirmation with resolved metadata.
+    """
+    if operation == "DELETE":
+        import_strategy = {"importStrategy": "DELETE"}
+    else:
+        import_strategy = {"importStrategy": "CREATE_AND_UPDATE"}
+    print(f"submit_aggregate_data_from_text received => {parsed_payload}")
+    print(f"params received => {import_strategy}")
+
+    try:
+        # --- Validate required fields ---
+        required_fields = ["dataElement", "orgUnit", "period", "categoryOptionCombos", "attributeOptionCombos", "value"]
+        for field in required_fields:
+            if field not in parsed_payload or not parsed_payload[field]:
+                return {"status": "error", "message": f"Missing required field: {field}"}
+
+        if parsed_payload["categoryOptionCombos"] == parsed_payload["attributeOptionCombos"]:
+            return {
+                "status": "error",
+                "message": "CategoryOptionCombos and AttributeOptionCombos resolved to the same UID. Please review your input to ensure they are distinct."
+            }
+        # --- Build response ---
+        final_payload = {
+            "operation": operation,
+            "preview_only": preview_only,
+            "parsed_payload": parsed_payload
+        }
+
+
+
+        if preview_only:
+            return {
+                "status": "PREVIEW",
+                "message": "This is a preview of the data to be submitted.",
+                "result": final_payload
+            }
+        # Prepare data payload
+        # Extract relevant records
+        # ✅ Build DHIS2 dataValues payload
+        print(f"final_payload => {final_payload}")
+        payload = {
+            "dataValues": [
+                {
+                    "dataElement": parsed_payload["dataElement"],
+                    "orgUnit": parsed_payload["orgUnit"],
+                    "period": parsed_payload["period"],
+                    "categoryOptionCombo": parsed_payload["categoryOptionCombos"],
+                    "attributeOptionCombo": parsed_payload["attributeOptionCombos"],
+                    "value": parsed_payload["value"],
+                }
+            ]
+        }
+
+
+        print("+++ payload +++")
+        print(payload)
+
+        # Send request to DHIS2 API
+        try:
+            posted_data = post_data(import_strategy, payload)
+            print(f"posted_data => {posted_data}")
+            return posted_data
+
+        except Exception as e:
+            return {
+                "error": "DHIS2 operation failed.",
+                "operation": operation,
+                "details": str(e),
+            }
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+
 
 @tool(args_schema=SubmitPayload)
 def submit_aggregate_data(
@@ -304,34 +440,42 @@ def submit_aggregate_data(
 
     if preview_only:
         return {"preview_payload": payload, "operation": params}
-    response = {}
     # Send request to DHIS2 API
     try:
         import_strategy = {"importStrategy": "CREATE_AND_UPDATE"}
         if params and params.upper() == "DELETE":
             import_strategy = {"importStrategy": "DELETE"}
+        posted_data = post_data(import_strategy, payload)
+        print(f"posted_data => {posted_data}")
+        return posted_data
+    except Exception as e:
+        return {
+            "error": "DHIS2 operation failed.",
+            "params": params,
+            "details": str(e)
+        }
 
+def post_data(import_strategy, payload):
+    response = {}
+    try:
         url = f"{DHIS2_BASE_URL}/api/dataValueSets"
         response = requests.post(url, json=payload, auth=auth, params=import_strategy)
         response.raise_for_status()
-        print({"data": response.json(), "operation": params})
-
-        return {"data": response.json(), "operation": params}
-
+        print({"data": response.json(), "operation": import_strategy["importStrategy"]})
+        return {"data": response.json(), "operation": import_strategy["importStrategy"]}
     except requests.RequestException as e:
         return {
             "error": "DHIS2 operation failed.",
-            "operation": params,
             "status_code": response.status_code if 'response' in locals() else None,
             "details": str(e),
-            "response_text": response.text if 'response' in locals() else None,
+            "response_text": response.text if 'response' in locals() else None
         }
 
 class ColumnMappingInput(BaseModel):
     columns: List[str]
 
 
-from fuzzysearch import find_near_matches
+
 
 @tool(args_schema=ColumnMappingInput)
 def suggest_column_mapping(columns: List[str]) -> Dict[str, str]:

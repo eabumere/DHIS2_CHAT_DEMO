@@ -3,7 +3,7 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, AIMessage, ToolMessage
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from .tools.data_entry_tools import submit_aggregate_data, suggest_column_mapping
+from .tools.data_entry_tools import submit_aggregate_data, suggest_column_mapping, submit_aggregate_data_from_text, search_metadata
 from dotenv import load_dotenv
 from typing import List, TypedDict, Optional, Any
 import streamlit as st
@@ -20,6 +20,7 @@ class AgentState(TypedDict):
     image: Optional[Image.Image]
     word_text: Optional[str]
     ppt_text: Optional[str]
+    suggestion_tool_result: Optional[str]
 
 
 
@@ -28,29 +29,64 @@ You are a DHIS2 data entry assistant. Your job is to help users submit, update, 
 
 AVAILABLE TOOLS:
 1. suggest_column_mapping - Use this to map CSV columns to DHIS2 fields
-2. submit_aggregate_data - Use this to submit, update, or delete data
+2. submit_aggregate_data - Use this to submit, update, or delete uploaded CSV/Excel data
+3. search_metadata - Use this to resolve free-text names (orgUnit, categoryOptionCombos, attributeOptionCombos, dataElement, etc.) into DHIS2 IDs
+4. submit_aggregate_data_from_text - Use this to handle natural language data entry where no file is uploaded.
+   - REQUIRED INPUT: parsed_payload (dict) with the following keys:
+        {{
+          "dataElement": "<RESOLVED ID>",
+          "orgUnit": "<RESOLVED ID>",
+          "period": "YYYYMM",
+          "categoryOptionCombos": "<RESOLVED ID>",
+          "attributeOptionCombos": "<RESOLVED ID>",
+          "value": number
+        }}
+   - It also accepts preview_only (bool) and operation ("SUBMIT", "UPDATE", "DELETE").
+   - IMPORTANT: This tool only accepts resolved IDs. Use search_metadata first if user input is in free text.
+
+### Metadata Lookup Rules
+- If the user provides free-text names (e.g., "Andulo", "maternal deaths") or codes (e.g., "HTS_TST"), call `search_metadata` to resolve them into IDs.
+- If `metadata_result.selected` or `selected_metadata_id` is already provided, **skip search_metadata** and use the given ID directly.
+- Never override or re-infer an ID if it was already confirmed by the user.
+- If multiple matches are found, present them to the user and retry with the selected one.
+- categoryOptionCombos and attributeOptionCombos must resolve to different metadata dimensions.
+- If both resolve to the same UID, treat it as a potential quality issue. 
+  → Ask the user to confirm or refine the input before submission.
 
 WORKFLOW:
-1. When user uploads data, use suggest_column_mapping to create column mappings
-2. When user wants to submit/import data, call submit_aggregate_data with preview_only=True first
-3. When user confirms, call submit_aggregate_data with preview_only=False
-4. When user wants to delete data, call submit_aggregate_data with params="DELETE"
+1. When the user uploads a file:
+   - Use suggest_column_mapping to create column mappings
+   - Call submit_aggregate_data with preview_only=True first
+   - If the user confirms, call submit_aggregate_data again with preview_only=False
+   - For deletions, call submit_aggregate_data with params="DELETE"
+
+2. When the user provides natural language input (no file uploaded):
+   - Parse their request into parsed_payload with free text values
+   - Resolve orgUnit, categoryOptionCombos, attributeOptionCombos, and dataElement via search_metadata
+   - ALWAYS normalize the period into YYYYMM format (e.g., "August 2025" → "202508")
+   - Call submit_aggregate_data_from_text with preview_only=True first
+   - If the user confirms, call submit_aggregate_data_from_text again with preview_only=False
+   - For deletions, call submit_aggregate_data_from_text with params="DELETE"
 
 IMPORTANT RULES:
-- ALWAYS use the tools. Never just describe what you will do.
-- For any data operation (submit/update/delete), you MUST call submit_aggregate_data
-- If user says "use it", "submit", "import", "delete", "update" - call the appropriate tool immediately
-- Do not ask for clarification unless absolutely necessary
-- Show previews before destructive operations
+- After showing a preview, confirmation ALWAYS means re-calling the same tool with preview_only=False.
+- NEVER call the same tool twice with preview_only=True after confirmation.
+- categoryOptionCombos and attributeOptionCombos MUST be resolved IDs (string), not a list.
+- ALWAYS use tools — never just describe actions.
+- Do not ask for clarification unless strictly necessary.
+- Always show previews before destructive operations.
 
 RESPONSE FORMAT:
-- When calling tools, just call them directly
-- When showing results, be concise and clear
-- Never include internal instructions in your responses to users
+- Tool calls must always include parsed_payload.
+- Be concise and clear in responses.
+- Never include internal instructions in your replies.
 """
 
+
+
+
 llm = get_llm()
-tools = [submit_aggregate_data, suggest_column_mapping]
+tools = [submit_aggregate_data, suggest_column_mapping, submit_aggregate_data_from_text, search_metadata]
 prompt = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
     MessagesPlaceholder(variable_name="messages"),
@@ -61,76 +97,107 @@ agent = create_openai_tools_agent(llm, tools, prompt)
 openai_executor = AgentExecutor(
     agent=agent, 
     tools=tools, 
-    verbose=False,  # Reduce verbosity to prevent prompt leakage
-    return_intermediate_steps=False,  # Don't return intermediate steps to prevent confusion
+    verbose=True,  # Reduce verbosity to prevent prompt leakage
+    return_intermediate_steps=True,  # Don't return intermediate steps to prevent confusion
     handle_parsing_errors=True,
-    max_iterations=3  # Reduce iterations to prevent loops
+    max_iterations=15  # Reduce iterations to prevent loops
 )
 
 def agent_node(state: AgentState) -> AgentState:
     try:
         messages = state.get("messages", [])
-        
-        # Clear session state if this is a new conversation or new data upload
-        if messages and len(messages) == 1:  # First user message
-            if "suggested_columns_data_entry" in st.session_state:
-                del st.session_state["suggested_columns_data_entry"]
-        
-        # Check if we need to generate or regenerate column mapping
-        should_generate_mapping = False
-        
-        # Case 1: No mapping exists
-        if "raw_data_df_uploaded" in st.session_state and not st.session_state.get("suggested_columns_data_entry"):
-            should_generate_mapping = True
-        
-        # Case 2: Mapping exists but we're starting a new operation (check last user message)
-        elif "raw_data_df_uploaded" in st.session_state and st.session_state.get("suggested_columns_data_entry"):
-            if messages and hasattr(messages[-1], 'content'):
-                last_message = messages[-1].content.lower()
-                # If user is asking for a new operation, regenerate mapping
-                if any(keyword in last_message for keyword in ["submit", "delete", "update", "import", "post", "send", "use", "sure", "proceed"]):
-                    should_generate_mapping = True
-        
-        # Generate column mapping if needed
-        if should_generate_mapping:
-            column_mapping = suggest_column_mapping.invoke({
-                "columns": state.get("dataframe_columns", [])
-            })
-            st.session_state.suggested_columns_data_entry = column_mapping
+        file_uploaded =  st.session_state.get("file_uploaded", False)
+        if file_uploaded:
+            print("File uploaded")
+            # Clear session state if this is a new conversation or new data upload
+            if messages and len(messages) == 1:  # First user message
+                if "suggested_columns_data_entry" in st.session_state:
+                    del st.session_state["suggested_columns_data_entry"]
 
-            # Add context message
-            context_msg = AIMessage(content=f"""
+            # Check if we need to generate or regenerate column mapping
+            should_generate_mapping = False
+
+            # Case 1: No mapping exists
+            if "raw_data_df_uploaded" in st.session_state and not st.session_state.get("suggested_columns_data_entry"):
+                should_generate_mapping = True
+
+            # Case 2: Mapping exists but we're starting a new operation (check last user message)
+            elif "raw_data_df_uploaded" in st.session_state and st.session_state.get("suggested_columns_data_entry"):
+                if messages and hasattr(messages[-1], 'content'):
+                    last_message = messages[-1].content.lower()
+                    # If user is asking for a new operation, regenerate mapping
+                    if any(keyword in last_message for keyword in ["submit", "delete", "update", "import", "post", "send", "use", "sure", "proceed"]):
+                        should_generate_mapping = True
+
+            # Generate column mapping if needed
+            if should_generate_mapping:
+                column_mapping = suggest_column_mapping.invoke({
+                    "columns": state.get("dataframe_columns", [])
+                })
+                st.session_state.suggested_columns_data_entry = column_mapping
+
+                # Add context message
+                context_msg = AIMessage(content=f"""
+                    Available data: CSV with columns {state.get("dataframe_columns", [])}
+                    Suggested mapping: {column_mapping}
+                    Use submit_aggregate_data tool to process this data.
+                """)
+                messages.append(context_msg)
+
+            # If we have column mapping but no context message, add it
+            elif "raw_data_df_uploaded" in st.session_state and st.session_state.get("suggested_columns_data_entry") and not any("Available data: CSV with columns" in msg.content for msg in messages if hasattr(msg, 'content')):
+                column_mapping = st.session_state.get("suggested_columns_data_entry")
+                context_msg = AIMessage(content=f"""
                 Available data: CSV with columns {state.get("dataframe_columns", [])}
                 Suggested mapping: {column_mapping}
                 Use submit_aggregate_data tool to process this data.
-            """)
-            messages.append(context_msg)
+                """)
+                messages.append(context_msg)
+
+            state["messages"] = messages
         
-        # If we have column mapping but no context message, add it
-        elif "raw_data_df_uploaded" in st.session_state and st.session_state.get("suggested_columns_data_entry") and not any("Available data: CSV with columns" in msg.content for msg in messages if hasattr(msg, 'content')):
-            column_mapping = st.session_state.get("suggested_columns_data_entry")
-            context_msg = AIMessage(content=f"""
-            Available data: CSV with columns {state.get("dataframe_columns", [])}
-            Suggested mapping: {column_mapping}
-            Use submit_aggregate_data tool to process this data.
-            """)
-            messages.append(context_msg)
-        
-        state["messages"] = messages
-        
-        # Force tool usage by checking if user wants an operation
+
+    # Force tool usage by checking if user wants an operation
         if messages and hasattr(messages[-1], 'content'):
             last_message = messages[-1].content.lower()
             if any(keyword in last_message for keyword in ["submit", "delete", "update", "import", "post", "send", "use", "proceed"]):
                 # Add a system message to force tool usage
-                force_tool_msg = AIMessage(content="You must call submit_aggregate_data tool now. Do not respond with text only.")
+                force_tool_msg = AIMessage(content="You must call submit_aggregate_data_from_text tool now. Do not respond with text only.")
                 messages.append(force_tool_msg)
                 state["messages"] = messages
         
         result = openai_executor.invoke(state)  # Pass full state with all messages
+        # Extract latest message to show to the user
+        if isinstance(result, dict):
+            response_msg = None
+            tool_output = None
+            suggestion_tool_result = None  # ✅ initialize safely
+
+
+            # Final response message
+            if "output" in result:
+                response_msg = result["output"]
+            elif "messages" in result:
+                last_msg = result["messages"][-1]
+                response_msg = (
+                    last_msg if isinstance(last_msg, AIMessage)
+                    else AIMessage(content=str(last_msg))
+                )
+
+            # Capture tool output if available
+            if "intermediate_steps" in result:
+                for step in result["intermediate_steps"]:
+                    if isinstance(step, tuple):
+                        if step[0].tool == "search_metadata":
+                            suggestion_tool_result = step[1]
+
+            # print(f"result['intermediate_steps'] => {result["intermediate_steps"]}")
         return {
-            "messages": result["messages"],
-            "output": result["output"]
+            # "messages": result["messages"],
+            # "output": result["output"]
+            "messages": state["messages"] + [response_msg],
+            "output": response_msg,
+            "suggestion_tool_result": suggestion_tool_result  # <-- Include structured search_metadata result
         }
     except Exception as e:
         # Log full error for debugging

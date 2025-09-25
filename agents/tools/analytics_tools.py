@@ -20,8 +20,8 @@ DHIS2_BASE_URL = os.getenv("DHIS2_BASE_URL")
 DHIS2_USERNAME = os.getenv("DHIS2_USERNAME")
 DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD")
 # Define confidence threshold and convert to float
-# FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", 0.12))
-FAISS_THRESHOLD = 0.5  # TEMPORARY for testing
+FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", 0.5))
+# FAISS_THRESHOLD = 0.5  # TEMPORARY for testing
 
 # @tool
 # def query_analytics(
@@ -157,7 +157,7 @@ def search_metadata(query: str) -> Dict[str, Any]:
     """
     try:
         # docs_and_scores: List[Document] = vectorstore.similarity_search_with_score(query, k=5)
-        filtered_matches = hybrid_search(query)
+        filtered_matches = hybrid_search(query, FAISS_THRESHOLD, coc_metadata="other")
 
         # for doc, score in docs_and_scores:
         #     if score <= FAISS_THRESHOLD:

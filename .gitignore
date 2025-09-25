@@ -3,7 +3,7 @@ suggestion.txt
 #.gitignore
 ancestry_test.py
 settings.py
-
+index
 # Ignore the node_modules directory
 node_modules/
 migrations/

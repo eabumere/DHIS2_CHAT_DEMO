@@ -28,8 +28,8 @@ from agents.data_entry_agent import data_entry_executor
 # --- State ---
 class AgentState(TypedDict, total=False):
     messages: List[BaseMessage]
+    last_active_agent: Optional[str]
 
-# --- Routing Prompt ---
 system_prompt = """
 You are a dispatcher agent for a DHIS2 assistant.
 Your job is to decide which specialized agent should handle the user's request.
@@ -37,32 +37,32 @@ Your job is to decide which specialized agent should handle the user's request.
 There are five available agents:
 
 1. **Metadata Agent** (`metadata_agent`)
-   - Use for operations like creating, updating, deleting, or retrieving metadata:
-     - Examples: datasets, programs, data elements, org units, indicators, categories.
-     - e.g., "Create a new dataset", "What is the UID for ANC visits?"
+   - Use for operations like creating, updating, deleting, or retrieving metadata.
+   - e.g., "Create a new dataset", "What is the UID for ANC visits?"
 
 2. **Analytics Agent** (`analytics_agent`)
-   - Use for analytical queries:
-     - Generating charts, reports, trends, or summaries.
-     - Computing totals, averages, or performing breakdowns.
-     - e.g., "Show me a trend of malaria cases", "What's the total for Bo district?"
+   - Use for analytical queries.
+   - e.g., "Show me a trend of malaria cases", "What's the total for Bo district?"
 
 3. **Data Entry Agent** (`data_entry_agent`)
-   - Use for entering or updating aggregate data values:
-     - Standard data sets or data elements (not program-based).
-     - e.g., "Enter 25 malaria cases for Bombali for January."
+   - Use for entering or updating aggregate data values.
+   - Handles follow-up actions and confirmations related to previously started data entry operations.
 
 4. **Event Data Agent** (`event_data_agent`)
-   - Use for entering data for event-based (non-tracker) programs:
-     - Typically no registration, just single events.
-     - e.g., "Record a malaria event in Kenema on March 5th."
+   - Use for entering data for event-based (non-tracker) programs.
+   - e.g., "Record a malaria event in Kenema on March 5th."
 
 5. **Tracker Data Agent** (`tracker_data_agent`)
-   - Use for tracked entity operations (registration-based):
-     - Includes persons, follow-up visits, tracked events.
-     - e.g., "Register a pregnant woman for ANC", "Record a follow-up visit for ID XYZ."
+   - Use for tracked entity operations (registration-based).
+   - e.g., "Register a pregnant woman for ANC", "Record a follow-up visit for ID XYZ."
 
-
+ROUTING RULES:
+- If the user is confirming a previous operation (e.g., "yes", "confirm", "proceed", "submit", "delete it"),
+  route to the **last_active_agent** (provided in context).
+- Route to `metadata_agent` only for explicit metadata CRUD operations.
+- Route to `data_entry_agent` for aggregate data submissions, updates, or deletions.
+- Route to `analytics_agent`, `event_data_agent`, or `tracker_data_agent` for their respective domains.
+- If the request is ambiguous, return `clarify_agent` so the system can ask the user directly.
 
 Respond with **only one** of the following values (and nothing else):
 - `metadata_agent`
@@ -70,7 +70,12 @@ Respond with **only one** of the following values (and nothing else):
 - `data_entry_agent`
 - `event_data_agent`
 - `tracker_data_agent`
+- `clarify_agent`
 """
+
+
+
+
 # 6. **Azure Document Intelligence Agent** (`azure_document_intelligence_agent`)
 #    - Use for enterprise-grade document processing with Azure services:
 #      - Custom model training for facility register layouts
@@ -89,76 +94,73 @@ router_prompt = ChatPromptTemplate.from_messages([
 # --- Routing Decision ---
 def routing_decision(state: AgentState) -> str:
     """Decides which agent to route the request to based on last user message."""
-    if state["messages"]:
-        last_user_msg = state["messages"][-1]
+    if not state.get("messages"):
+        return "metadata"
 
-        # Prepare prompt to classify message
-        full_prompt = router_prompt.invoke({"messages": [last_user_msg]})
-        response = llm.invoke(full_prompt)
+    last_user_msg = state["messages"][-1]
+    user_text = last_user_msg.content.strip().lower()
+    print(f"last message {last_user_msg}")
 
-        # Clean and normalize the LLM decision carefully
-        decision_raw = response.content.strip().lower()
+    # --- Step 1: Detect confirmations or numeric selections ---
+    confirmation_keywords = {"yes", "confirm", "proceed", "submit", "delete", "ok", "sure"}
+    numeric_selection = user_text.isdigit()
+    looks_like_uid = len(user_text) == 11 and user_text.isalnum()
 
-        # Remove backticks or quotes surrounding the response if any
-        decision = decision_raw.strip("`'\"")
+    if user_text in confirmation_keywords or numeric_selection or looks_like_uid:
+        last_agent = state.get("last_active_agent")
+        if last_agent:
+            print(f"Routing to last active agent due to confirmation/selection/UID: {last_agent}")
+            return last_agent
+        else:
+            # Instead of defaulting, instruct Streamlit to ask user for clarification
+            return "clarify_agent"
 
-        # Debugging with repr to show hidden chars if any
-        print(f"Router Input: {last_user_msg.content}")
-        print(f"Router LLM Raw Response: {repr(response.content)}")
-        print(f"Router Decision (normalized): {repr(decision)}")
+    # --- Step 2: Ask LLM for classification ---
+    full_prompt = router_prompt.invoke({"messages": [last_user_msg]})
+    response = llm.invoke(full_prompt)
 
-        # Valid routes map LLM output to graph node names
-        valid_routes = {
-            "metadata_agent": "metadata",
-            "analytics_agent": "analytics",
-            "data_entry_agent": "data_entry",
-            "event_data_agent": "event_data",
-            "tracker_data_agent": "tracker_data",
-            # "azure_document_intelligence_agent": "azure_document_intelligence"
-        }
+    decision_raw = response.content.strip().lower()
+    decision = decision_raw.strip("`'\"")
 
-        # Strict match on cleaned decision
-        if decision in valid_routes:
-            return valid_routes[decision]
+    print(f"Router Input: {last_user_msg.content}")
+    print(f"Router LLM Raw Response: {repr(response.content)}")
+    print(f"Router Decision (normalized): {repr(decision)}")
 
-        # Fallback: keyword-based routing if LLM response invalid or unexpected
-        text = last_user_msg.content.lower()
+    valid_routes = {
+        "metadata_agent": "metadata",
+        "analytics_agent": "analytics",
+        "data_entry_agent": "data_entry",
+        "event_data_agent": "event_data",
+        "tracker_data_agent": "tracker_data",
+    }
 
-        keyword_routes = {
-            "analytics_agent": ["report", "chart", "trend", "visual", "analysis", "insight"],
-            "metadata_agent": [
-                "data element", "dataset", "program", "org unit", "indicator",
-                "create metadata", "update metadata", "delete metadata"
-            ],
-            "data_entry_agent": ["aggregate", "aggregate data entry", "data entry"
-                "form", "submit", "enter value", "fill form",
-                "create aggregate data", "update data", "delete data"
-            ],
-            "event_data_agent": [
-                "event", "single event", "event program", "malaria event", "non-tracker event"
-            ],
-            "tracker_data_agent": [
-                "tracked", "tei", "enrollment", "enrol", "visit", "follow-up", "tracked entity", "patients", "ART Register"
-            ],
-            # "azure_document_intelligence_agent": ["scanned", "scanned document",
-            #                                       "facility register", "handwritten", "convert",
-            #                                       "azure", "custom model", "train model",
-            #                                       "enterprise", "production",
-            #                                       "azure document intelligence",
-            #                                       "picture", "image", "extract"]
-        }
+    if decision in valid_routes:
+        chosen = valid_routes[decision]
+        state["last_active_agent"] = chosen  # persist context
+        return chosen
 
-        def keyword_fallback(this_text: str) -> str:
-            for agent, keywords in keyword_routes.items():
-                if any(k in text for k in keywords):
-                    print(f"Routing based on keyword fallback to: {agent}")
-                    return valid_routes.get(agent, "metadata")
-            return "metadata"
+    # --- Step 3: Keyword fallback ---
+    keyword_routes = {
+        "analytics_agent": ["report", "chart", "trend", "visual", "analysis", "insight"],
+        "metadata_agent": ["data element", "dataset", "program", "org unit", "indicator",
+                           "create metadata", "update metadata", "delete metadata"],
+        "data_entry_agent": ["aggregate", "data entry", "submit", "enter value", "fill form",
+                             "create aggregate data", "update data", "delete data"],
+        "event_data_agent": ["event", "single event", "event program", "malaria event"],
+        "tracker_data_agent": ["tracked", "tei", "enrollment", "visit", "follow-up", "patients"],
+    }
 
-        return keyword_fallback(text)
+    for agent, keywords in keyword_routes.items():
+        if any(k in user_text for k in keywords):
+            chosen = valid_routes[agent]
+            state["last_active_agent"] = chosen  # persist context
+            print(f"Routing based on keyword fallback to: {agent}")
+            return chosen
 
-    # Final fallback if no messages
-    return "metadata"
+    # --- Step 4: Could not classify ---
+    print("No valid routing found. Asking user to clarify explicitly.")
+    return "clarify_agent"
+
 
 
 # --- Agent Nodes ---

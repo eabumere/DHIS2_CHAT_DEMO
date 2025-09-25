@@ -15,13 +15,26 @@ embedding_model = AzureOpenAIEmbeddings(
     openai_api_version=os.getenv("OPENAI_API_VERSION"),
     openai_api_key=os.getenv("AZURE_OPENAI_API_KEY"),
 )
+DHIS2_BASE_URL = os.getenv("DHIS2_BASE_URL")
+# Step 1: split by //
+host_part = DHIS2_BASE_URL.split("//", 1)[1]
+
+# Step 2: get the subdomain
+subdomain = host_part.split(".")[0]
+
 
 # Load the FAISS index with fallback paths
 faiss_paths = [
-    "faiss_search/index/",
-    "tools/faiss_search/index/",
-    "agents/tools/faiss_search/index/",
-    "index/"
+    f"faiss_search/index/{subdomain}/",
+    f"tools/faiss_search/index/{subdomain}/",
+    f"agents/tools/faiss_search/index/{subdomain}/",
+    f"index/{subdomain}/"
+]
+coc_faiss_paths = [
+    f"faiss_search/index/{subdomain}/coc/",
+    f"tools/faiss_search/index/{subdomain}/coc/",
+    f"agents/tools/faiss_search/index/{subdomain}/coc/",
+    f"index/{subdomain}/coc/"
 ]
 
 last_exception = ""
@@ -34,13 +47,23 @@ for path in faiss_paths:
 else:
     raise RuntimeError(f"Failed to load FAISS index from all fallback paths. Last error: {last_exception}")
 
-def hybrid_search(query: str):
+for path in coc_faiss_paths:
+    try:
+        coc_vectorstore = FAISS.load_local(path, embedding_model, allow_dangerous_deserialization=True)
+        break
+    except Exception as e:
+        last_exception = e
+else:
+    raise RuntimeError(f"Failed to load coc FAISS index from all fallback paths. Last error: {last_exception}")
+
+def hybrid_search(query: str, threshold: float, coc_metadata):
     # Step 1: Try exact search
     matches = []
     query_lower = query.strip().lower()
     filtered_matches = []
-
-    for doc in vectorstore.docstore._dict.values():
+    print(f"coc_metadata == > {coc_metadata}")
+    store = coc_vectorstore if coc_metadata in ("categoryOptionCombos", "attributeOptionCombos") else vectorstore
+    for doc in store.docstore._dict.values():
         if (
             query_lower == doc.page_content.strip().lower() or
             query_lower == doc.metadata.get("name", "").strip().lower() or
@@ -48,6 +71,7 @@ def hybrid_search(query: str):
             query_lower == doc.metadata.get("description", "").strip().lower()
         ):
             matches.append(doc)
+
     if matches:
         print("✅ Exact match found.")
         print(f"\n🔍 Top results for: '{query}'\n")
@@ -64,23 +88,29 @@ def hybrid_search(query: str):
 
     # Step 2: Fall back to semantic search
     print("🔍 Falling back to semantic search...")
-    return fiass_query(query)
+    return semantic_query(query,  coc_metadata, threshold)
 
-def fiass_query(query):
+def semantic_query(query,  metadata_, threshold=None):
     """
     Perform a FAISS similarity search and print results above a given score threshold.
 
     Args:
         query (str): The search query.
         threshold (float): The minimum similarity score to include a result (lower = more similar).
+        metadata_: The metadat type to be searched
     """
-    results = vectorstore.similarity_search_with_score(query, k=5)
+    store = coc_vectorstore if metadata_ in ("categoryOptionCombos", "attributeOptionCombos") else vectorstore
+    results = store.similarity_search_with_score(query, k=5)
     filtered_matches = []
 
-    print(f"\n🔍 Top results for: '{query}' (threshold ≤ {FAISS_THRESHOLD})\n")
+    if threshold is None:
+        threshold = FAISS_THRESHOLD
+
+
+    print(f"\n🔍 Top results for: '{query}' (threshold ≤ {threshold})\n")
     count = 0
     for i, (doc, score) in enumerate(results, 1):
-        if score <= FAISS_THRESHOLD:
+        if score <= threshold:
             count += 1
             doc_type = doc.metadata.get("type", "unknown")
             doc_id = doc.metadata.get("id", "N/A")
@@ -90,7 +120,7 @@ def fiass_query(query):
             filtered_matches.append({
                 "name": name,
                 "id": doc_id,
-                "doc_type": doc_type,
+                "doc_type": metadata_,
                 "categories": categories,
                 "score": float(score)
             })
@@ -123,7 +153,10 @@ def filter_documents_by_metadata(doc_type: str, filters: dict = None):
     return results
 
 # # print(hybrid_search("received HIV Testing Services (HTS) and received their test results"))
-# hybrid_search("Andulo")
+# hybrid_search("Associacao Beneficiente Crista (ABC) ASAP DSD")
+# hybrid_search("TX_NEW: Number of individuals newly enrolled on ART", metadata="dataElement")
+# hybrid_search("General Population, Female, CD4: <200, 15-19 Years", FAISS_THRESHOLD, coc_metadata="coc")
+# hybrid_search("Andulo", FAISS_THRESHOLD, coc_metadata="other")
 
 # Get all org units with level == 2
 
