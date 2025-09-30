@@ -2,6 +2,8 @@ import requests
 from typing import List, Dict, Any, Optional
 import json
 import os
+from langchain.tools import tool
+from agents.tools.faiss_search.search import hybrid_search
 from dotenv import load_dotenv
 
 # Load environment variables only once
@@ -9,7 +11,8 @@ load_dotenv()
 DHIS2_BASE_URL = os.getenv("DHIS2_BASE_URL")
 DHIS2_USERNAME = os.getenv("DHIS2_USERNAME")
 DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD")
-
+FAISS_THRESHOLD = 0.2
+# FAISS_THRESHOLD = float(os.getenv("FAISS_THRESHOLD", 0.5))
 
 def get_all(
     endpoint: str,
@@ -62,3 +65,35 @@ def generate_dhis2_ids(count: int = 1) -> str:
         return "\n".join(ids) if ids else "⚠️ No IDs returned."
     except Exception as e:
         return f"❌ Failed to generate ID(s): {str(e)}"
+
+
+@tool
+def search_metadata(query: str, metadata: str) -> Dict[str, Any]:
+    """
+    Searches metadata using vector similarity based on the query string.
+    Returns either a single match or a list of high-confidence options for user selection.
+    """
+    print(f"Searching started for {query}")
+    try:
+        # docs_and_scores: List[Document] = vectorstore.similarity_search_with_score(query, k=5)
+        filtered_matches = hybrid_search(query, FAISS_THRESHOLD, coc_metadata=metadata)
+        if not filtered_matches:
+            return {
+                "status": "no_match",
+                "message": f"No indicator match found with score ≤ {FAISS_THRESHOLD}.",
+                "suggestions": []
+            }
+
+        if len(filtered_matches) == 1:
+            return {
+                "status": "auto_selected",
+                "selected": filtered_matches[0]
+            }
+
+        return {
+            "status": "multiple_matches",
+            "suggestions": filtered_matches
+        }
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

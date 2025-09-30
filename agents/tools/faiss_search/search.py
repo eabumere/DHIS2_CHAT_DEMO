@@ -4,6 +4,8 @@ import os
 from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
 from langchain_openai import AzureOpenAIEmbeddings  # Ensure it's installed
+from pathlib import Path
+import faiss
 
 # Load environment variables
 load_dotenv()
@@ -22,7 +24,6 @@ host_part = DHIS2_BASE_URL.split("//", 1)[1]
 # Step 2: get the subdomain
 subdomain = host_part.split(".")[0]
 
-
 # Load the FAISS index with fallback paths
 faiss_paths = [
     f"faiss_search/index/{subdomain}/",
@@ -36,25 +37,32 @@ coc_faiss_paths = [
     f"agents/tools/faiss_search/index/{subdomain}/coc/",
     f"index/{subdomain}/coc/"
 ]
-
+search_index_folder_exist = False
+search_coc_folder_exist = False
 last_exception = ""
 for path in faiss_paths:
     try:
         vectorstore = FAISS.load_local(path, embedding_model, allow_dangerous_deserialization=True)
+        search_index_folder_exist = True
         break
     except Exception as e:
         last_exception = e
 else:
-    raise RuntimeError(f"Failed to load FAISS index from all fallback paths. Last error: {last_exception}")
+    print(f"Failed to load FAISS index from all fallback paths. Last error: {last_exception}")
+    # raise RuntimeError(f"Failed to load FAISS index from all fallback paths. Last error: {last_exception}")
 
 for path in coc_faiss_paths:
     try:
         coc_vectorstore = FAISS.load_local(path, embedding_model, allow_dangerous_deserialization=True)
+        search_coc_folder_exist = True
         break
     except Exception as e:
         last_exception = e
 else:
-    raise RuntimeError(f"Failed to load coc FAISS index from all fallback paths. Last error: {last_exception}")
+    print(f"search_index_folder_exist: {search_index_folder_exist}")
+    print(f"coc_faiss_paths: {coc_faiss_paths}")
+    print(f"Failed to load coc FAISS index from all fallback paths. Last error: {last_exception}")
+    # raise RuntimeError(f"Failed to load coc FAISS index from all fallback paths. Last error: {last_exception}")
 
 def hybrid_search(query: str, threshold: float, coc_metadata):
     # Step 1: Try exact search

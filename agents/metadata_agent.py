@@ -174,6 +174,12 @@ Only use tools provided: get_dhis2_metadata, create_metadata, update_metadata{',
 If a request goes beyond these, inform the user.
 
 Be concise, helpful, and accurate.
+
+⚠️ IMPORTANT: Every metadata object in the payload must have a globally unique `id`. 
+- Never reuse the same ID for multiple objects, even if they belong to the same parent (e.g., multiple categoryOptionCombos in the same categoryCombo). 
+- Always call `generate_dhis2_ids` for each new object to guarantee uniqueness.
+- If duplicate IDs are detected, regenerate them before constructing the final payload.
+
 """
 
 

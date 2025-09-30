@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 import pandas as pd
 import streamlit as st
 from fuzzysearch import find_near_matches
-from .faiss_search.search import hybrid_search
+# from .faiss_search.search import hybrid_search
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 import pandas as pd
 from io import StringIO
@@ -184,42 +184,13 @@ class SubmitPayload(BaseModel):
         )
     )
 
-@tool
-def search_metadata(query: str, metadata: str) -> Dict[str, Any]:
-    """
-    Searches metadata using vector similarity based on the query string.
-    Returns either a single match or a list of high-confidence options for user selection.
-    """
-    print(f"Searching started for {query}")
-    try:
-        # docs_and_scores: List[Document] = vectorstore.similarity_search_with_score(query, k=5)
-        filtered_matches = hybrid_search(query, FAISS_THRESHOLD, coc_metadata=metadata)
-        if not filtered_matches:
-            return {
-                "status": "no_match",
-                "message": f"No indicator match found with score ≤ {FAISS_THRESHOLD}.",
-                "suggestions": []
-            }
 
-        if len(filtered_matches) == 1:
-            return {
-                "status": "auto_selected",
-                "selected": filtered_matches[0]
-            }
-
-        return {
-            "status": "multiple_matches",
-            "suggestions": filtered_matches
-        }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 
 @tool
 def submit_aggregate_data_from_text(
     parsed_payload: Dict[str, Any],
-    preview_only: bool = True,
+    preview_only: bool = False,
     operation: str = "SUBMIT"
 ) -> Dict[str, Any]:
     """

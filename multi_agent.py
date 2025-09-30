@@ -11,6 +11,7 @@ import os
 import pandas as pd
 from PIL import Image
 from utils.llm import get_llm
+import streamlit as st
 # --- LLM for Routing ---
 llm = get_llm()
 # Load environment variables
@@ -99,15 +100,16 @@ def routing_decision(state: AgentState) -> str:
 
     last_user_msg = state["messages"][-1]
     user_text = last_user_msg.content.strip().lower()
-    print(f"last message {last_user_msg}")
+    # print(f"last message {last_user_msg}")
 
     # --- Step 1: Detect confirmations or numeric selections ---
-    confirmation_keywords = {"yes", "confirm", "proceed", "submit", "delete", "ok", "sure"}
+    confirmation_keywords = {"yes", "confirm", "proceed", "submit", "delete", "ok", "sure", "proceed with submitting this data", "no"}
     numeric_selection = user_text.isdigit()
     looks_like_uid = len(user_text) == 11 and user_text.isalnum()
-
+    last_agent = state.get("last_active_agent")
     if user_text in confirmation_keywords or numeric_selection or looks_like_uid:
         last_agent = state.get("last_active_agent")
+        print(f"present agent: {last_agent}")
         if last_agent:
             print(f"Routing to last active agent due to confirmation/selection/UID: {last_agent}")
             return last_agent
@@ -137,6 +139,7 @@ def routing_decision(state: AgentState) -> str:
     if decision in valid_routes:
         chosen = valid_routes[decision]
         state["last_active_agent"] = chosen  # persist context
+        st.session_state.last_active_agent = chosen
         return chosen
 
     # --- Step 3: Keyword fallback ---
@@ -144,10 +147,10 @@ def routing_decision(state: AgentState) -> str:
         "analytics_agent": ["report", "chart", "trend", "visual", "analysis", "insight"],
         "metadata_agent": ["data element", "dataset", "program", "org unit", "indicator",
                            "create metadata", "update metadata", "delete metadata"],
-        "data_entry_agent": ["aggregate", "data entry", "submit", "enter value", "fill form",
+        "data_entry_agent": ["aggregate", "data entry", "submit", "enter value",
                              "create aggregate data", "update data", "delete data"],
         "event_data_agent": ["event", "single event", "event program", "malaria event"],
-        "tracker_data_agent": ["tracked", "tei", "enrollment", "visit", "follow-up", "patients"],
+        "tracker_data_agent": ["tracked", "tei", "enrollment", "visit", "follow-up", "patients", "enroll", "individual", "Register"],
     }
 
     for agent, keywords in keyword_routes.items():

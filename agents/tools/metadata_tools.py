@@ -211,22 +211,17 @@ def read_response(response_json):
     updated_items = []
     deleted_items = []
     ignored_items = []
-    error_items = []
+
     for report in type_reports:
         klass = report.get("klass", "Unknown")
         # Strip "org.hisp.dhis." prefix
         friendly_name = klass.split('.')[-1]
         stats = report.get("stats", {})
-        object_reports = report.get("objectReports", [])
-        print(" ==== object_reports ====")
-        print(object_reports)
-        error_reports = object_reports[0].get("errorReports", [])
         created = stats.get("created", 0)
         updated = stats.get("updated", 0)
         deleted = stats.get("deleted", 0)
         ignored = stats.get("ignored", 0)
-        if len(error_reports) > 0:
-            error_items.append(f"Error: {error_reports[0]}")
+
         if created:
             created_items.append(f"{created} {friendly_name}")
         if updated:
@@ -245,8 +240,6 @@ def read_response(response_json):
         message_parts.append("deleted: " + ", ".join(deleted_items))
     if ignored_items:
         message_parts.append("Ignored: " + ", ".join(ignored_items))
-    if error_items:
-        message_parts.append("Ignored: " + ", ".join(error_items))
 
     message = "; ".join(message_parts) if message_parts else "No changes made."
 
@@ -256,7 +249,6 @@ def read_response(response_json):
         "updatedItems": updated_items,
         "deletedItems": deleted_items,
         "ignoredItems": ignored_items,
-        "error_items": error_items,
         "message": message
     }, indent=2)
 
@@ -330,28 +322,6 @@ def create_metadata(input_str: str) -> str:
             response_json = post_dhis2_api("metadata", payload_dict, params={"importStrategy": "CREATE_UPDATE"})
             interpreted = read_response(response_json)
             return  interpreted
-
-
-
-        # for endpoint, payload in payload_dict.items():
-        #     print(endpoint)
-        #     print(payload)
-        #
-        #     # schema_name = endpoint.rstrip("s")
-        #     # if not isinstance(payload, list):
-        #     #     payload = [payload]
-        #     # schema = get_schema_with_retry(schema_name)
-        #     # for item in payload:
-        #     # #     apply_defaults(item, schema)
-        #     # #     ensure_required_fields(item, schema)
-        #     # #     print(item)
-        #     # #
-        #     # #     validate_payload_against_schema(item, schema)
-        #     #     created_items.append(item.get("name") or item.get("shortName") or "Unnamed item")
-        #     #
-        #     # final_payload[endpoint] = payload
-
-
     except RuntimeError as e:
         return json.dumps({"status": "error", "reason": str(e)}, indent=2)
     except Exception as e:
